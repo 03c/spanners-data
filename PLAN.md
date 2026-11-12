@@ -10,9 +10,10 @@ Plan of record. Status: draft for review.
 | `spanners-core` | policy presets + overrides, SQL classification, `execute_guarded` gate, config store |
 | `spanners-driver-sqlite` | streaming, interrupt cancel, timeout, fetch-stop caps, read-only |
 | `spanners-registry` | compile-time driver registry (`sqlite`) |
-| Tests | 36, green on Linux; Windows in CI |
-| M-1 spikes | both build; `bench/measure.sh` runs headless |
+| Tests | 36, green on Linux and Windows |
+| M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | Postgres / MySQL | not started (M2) |
+| CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest |
 | Shell | undecided — M-1 measurements pending on your machines |
 
 
