@@ -2,6 +2,20 @@
 
 Plan of record. Status: draft for review.
 
+## 0. Status (as built)
+
+| Item | State |
+| --- | --- |
+| `spanners-driver-api` | Driver/Session traits, lossless `Value`, streamed `QueryEvent` |
+| `spanners-core` | policy presets + overrides, SQL classification, `execute_guarded` gate, config store |
+| `spanners-driver-sqlite` | streaming, interrupt cancel, timeout, fetch-stop caps, read-only |
+| `spanners-registry` | compile-time driver registry (`sqlite`) |
+| Tests | 36, green on Linux; Windows in CI |
+| M-1 spikes | both build; `bench/measure.sh` runs headless |
+| Postgres / MySQL | not started (M2) |
+| Shell | undecided — M-1 measurements pending on your machines |
+
+
 ## 1. Goal
 
 A SQL client that opens instantly, never blocks the UI, and cannot accidentally
