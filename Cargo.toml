@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["apps/spike-egui", "apps/spike-tauri/src-tauri"]
 members = [
     "crates/driver-api",
     "crates/core",
