@@ -6,6 +6,12 @@ shell; the loser gets deleted.
 
 ## Run
 
+No build needed: every CI run uploads both binaries as artifacts
+(`spike-egui-<os>`, `spike-tauri-<os>`). Download and unzip them next to each
+other, then run one command.
+
+From source:
+
 ```bash
 # one-time, per shell
 cargo build --release --manifest-path apps/spike-egui/Cargo.toml
@@ -16,9 +22,14 @@ cargo build --release --manifest-path apps/spike-tauri/src-tauri/Cargo.toml
 bench/measure.sh
 ```
 
-Windows: run each `target\release\*.exe` from a terminal and read the
-`SPANNERS_*` lines; `/proc` is not available, so use Task Manager (or
-`Get-Process`) for RSS.
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File bench\measure.ps1
+```
+
+It sums the process tree with `Get-CimInstance Win32_Process`, which matters for
+the Tauri run because WebView2 spawns `msedgewebview2.exe` children.
 
 ## Metrics
 
