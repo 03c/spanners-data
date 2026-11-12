@@ -1,0 +1,17 @@
+[package]
+name = "spanners-driver-sqlite"
+description = "SQLite driver for Spanners Data (rusqlite, bundled)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spanners-driver-api.workspace = true
+async-trait.workspace = true
+rusqlite = { version = "0.42", features = ["bundled", "hooks", "column_decltype"] }
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27"

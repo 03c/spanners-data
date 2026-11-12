@@ -1,0 +1,15 @@
+[package]
+name = "spanners-registry"
+description = "Static driver registry for Spanners Data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spanners-driver-api.workspace = true
+spanners-driver-sqlite.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
