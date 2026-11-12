@@ -406,6 +406,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spanners-driver-api",
+ "spanners-driver-sqlite",
  "sqlparser",
  "tempfile",
  "thiserror",

@@ -17,5 +17,6 @@ toml = "1.2"
 directories = "6.0"
 
 [dev-dependencies]
+spanners-driver-sqlite.workspace = true
 tempfile = "3.27"
 serde_json.workspace = true
