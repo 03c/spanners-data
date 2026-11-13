@@ -95,9 +95,26 @@ pub enum QueryEvent {
     },
     Failed {
         message: String,
+        /// One of [`codes`] when the failure has a machine-readable meaning.
+        /// The message is for humans; this is what the UI branches on.
         code: Option<String>,
         position: Option<u32>,
     },
+}
+
+/// Values used in [`QueryEvent::Failed::code`]. Drivers translate their own
+/// vendor error codes into these so the UI does not have to know that Postgres
+/// calls a timeout `57014` and MySQL calls it `3024`.
+pub mod codes {
+    /// The user asked to stop; the query did not finish.
+    pub const CANCELLED: &str = "CANCELLED";
+    /// The statement deadline expired, either server-side or client-side.
+    pub const TIMEOUT: &str = "TIMEOUT";
+    /// The server refused a write because the session is read-only. This is the
+    /// safety profile doing its job, not a bug.
+    pub const READ_ONLY: &str = "READ_ONLY";
+    /// The connection is gone and the session has to be reconnected.
+    pub const DISCONNECTED: &str = "DISCONNECTED";
 }
 
 /// Session-level settings, applied by the driver *at connect time* so the
@@ -160,6 +177,47 @@ pub trait Session: Send + Sync {
     async fn close(&self) -> Result<()>;
 }
 
+/// A `Box<dyn Session>` is itself a session. Without this, every call site has
+/// to spell `s.as_ref()`, which is noise that obscures the actual work.
+#[async_trait]
+impl Session for Box<dyn Session> {
+    fn driver_id(&self) -> &'static str {
+        (**self).driver_id()
+    }
+    fn server_version(&self) -> &str {
+        (**self).server_version()
+    }
+    async fn execute(
+        &self,
+        sql: &str,
+        opts: ExecOpts,
+        events: mpsc::Sender<QueryEvent>,
+    ) -> Result<QueryId> {
+        (**self).execute(sql, opts, events).await
+    }
+    async fn cancel(&self, id: QueryId) -> Result<()> {
+        (**self).cancel(id).await
+    }
+    async fn schema(&self) -> Result<SchemaSnapshot> {
+        (**self).schema().await
+    }
+    async fn explain(&self, sql: &str) -> Result<Plan> {
+        (**self).explain(sql).await
+    }
+    async fn in_transaction(&self) -> bool {
+        (**self).in_transaction().await
+    }
+    async fn commit(&self) -> Result<()> {
+        (**self).commit().await
+    }
+    async fn rollback(&self) -> Result<()> {
+        (**self).rollback().await
+    }
+    async fn close(&self) -> Result<()> {
+        (**self).close().await
+    }
+}
+
 /// Connection fields. Passwords never live here — they come from the keychain
 /// and are passed separately at connect time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +228,10 @@ pub struct ConnConfig {
     pub port: Option<u16>,
     pub database: Option<String>,
     pub username: Option<String>,
+    /// Supplied at connect time from the keychain. `ConnConfig` is the runtime
+    /// shape; the persisted `Connection` never contains this.
+    #[serde(skip)]
+    pub password: Option<String>,
     pub params: Vec<(String, String)>,
 }
 
@@ -181,6 +243,7 @@ impl ConnConfig {
             port: None,
             database: Some(path.into()),
             username: None,
+            password: None,
             params: Vec::new(),
         }
     }

@@ -19,8 +19,9 @@ use rusqlite::{Connection, InterruptHandle, OpenFlags};
 use tokio::sync::mpsc;
 
 use spanners_driver_api::{
-    Column, ConnConfig, Dialect, Driver, DriverError, ExecOpts, Plan, QueryEvent, QueryId, Result,
-    Row, Schema, SchemaSnapshot, Session, SessionOpts, Table, TableColumn, TableKind, Value,
+    codes, Column, ConnConfig, Dialect, Driver, DriverError, ExecOpts, Plan, QueryEvent, QueryId,
+    Result, Row, Schema, SchemaSnapshot, Session, SessionOpts, Table, TableColumn, TableKind,
+    Value,
 };
 
 const BATCH_ROWS: usize = 500;
@@ -294,7 +295,7 @@ fn run_blocking(
 ) {
     let started = Instant::now();
 
-    let mut guard = match conn.lock() {
+    let guard = match conn.lock() {
         Ok(g) => g,
         Err(_) => {
             let _ = events.blocking_send(QueryEvent::Failed {
@@ -311,7 +312,7 @@ fn run_blocking(
         // error legible instead of "attempt to write a readonly database".
         let _ = events.blocking_send(QueryEvent::Failed {
             message: "this connection is read-only".into(),
-            code: Some("READ_ONLY".into()),
+            code: Some(codes::READ_ONLY.into()),
             position: None,
         });
         return;
@@ -329,25 +330,21 @@ fn run_blocking(
     let _ = guard.progress_handler(0, None::<fn() -> bool>);
 
     if let Err(err) = result {
-        if cancelled.load(Ordering::SeqCst) {
-            let _ = events.blocking_send(QueryEvent::Failed {
-                message: "query cancelled".into(),
-                code: Some("CANCELLED".into()),
-                position: None,
-            });
+        let code = if cancelled.load(Ordering::SeqCst) {
+            Some(codes::CANCELLED.to_string())
         } else if deadline.is_some_and(|d| Instant::now() >= d) {
-            let _ = events.blocking_send(QueryEvent::Failed {
-                message: "query timed out".into(),
-                code: Some("TIMEOUT".into()),
-                position: None,
-            });
+            Some(codes::TIMEOUT.to_string())
+        } else if err.contains("readonly database") {
+            // SQLITE_READONLY: the safety profile refused the write.
+            Some(codes::READ_ONLY.to_string())
         } else {
-            let _ = events.blocking_send(QueryEvent::Failed {
-                message: err,
-                code: None,
-                position: None,
-            });
-        }
+            None
+        };
+        let _ = events.blocking_send(QueryEvent::Failed {
+            message: err,
+            code,
+            position: None,
+        });
     }
 }
 
@@ -361,7 +358,7 @@ fn stream_query(
 ) -> std::result::Result<(), String> {
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
 
-    let cols: Vec<rusqlite::Column<'_>> = stmt.columns().collect();
+    let cols: Vec<rusqlite::Column<'_>> = stmt.columns().into_iter().collect();
     let decltypes: Vec<String> = cols
         .iter()
         .map(|c| c.decl_type().unwrap_or("").to_owned())

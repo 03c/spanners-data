@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 spanners-driver-api.workspace = true
 spanners-driver-sqlite.workspace = true
+spanners-driver-postgres.workspace = true
+spanners-driver-mysql.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

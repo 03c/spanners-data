@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 spanners-driver-api.workspace = true
 async-trait.workspace = true
-rusqlite = { version = "0.42", features = ["bundled", "hooks", "column_decltype"] }
+rusqlite = { version = "0.39", features = ["bundled", "hooks", "column_decltype"] }
 tokio.workspace = true
 
 [dev-dependencies]

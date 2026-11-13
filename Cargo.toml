@@ -6,6 +6,8 @@ members = [
     "crates/core",
     "crates/driver-sqlite",
     "crates/registry",
+    "crates/driver-postgres",
+    "crates/driver-mysql",
 ]
 
 [workspace.package]
@@ -24,6 +26,8 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "
 
 spanners-driver-api = { path = "crates/driver-api" }
 spanners-driver-sqlite = { path = "crates/driver-sqlite" }
+spanners-driver-postgres = { path = "crates/driver-postgres" }
+spanners-driver-mysql = { path = "crates/driver-mysql" }
 
 [profile.release]
 opt-level = 3

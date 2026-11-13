@@ -30,6 +30,8 @@ impl Registry {
     pub fn default_registry() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(spanners_driver_sqlite::SqliteDriver::new()));
+        r.register(Arc::new(spanners_driver_postgres::PostgresDriver::new()));
+        r.register(Arc::new(spanners_driver_mysql::MySqlDriver::new()));
         r
     }
 
@@ -84,10 +86,17 @@ mod tests {
     }
 
     #[test]
-    fn ships_with_sqlite() {
+    fn ships_with_every_built_in_driver() {
         let r = Registry::default_registry();
-        assert_eq!(r.ids(), ["sqlite"]);
-        assert!(r.get("mysql").is_none());
+        assert_eq!(r.ids(), ["mysql", "postgres", "sqlite"]);
+    }
+
+    #[test]
+    fn drivers_report_their_own_defaults() {
+        let r = Registry::default_registry();
+        assert_eq!(r.get("postgres").unwrap().default_port(), Some(5432));
+        assert_eq!(r.get("mysql").unwrap().default_port(), Some(3306));
+        assert_eq!(r.get("sqlite").unwrap().default_port(), None);
     }
 
     #[test]
