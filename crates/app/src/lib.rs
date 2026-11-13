@@ -59,6 +59,11 @@ pub enum AppError {
     NeedsConfirmation {
         reasons: Vec<spanners_core::Violation>,
     },
+    /// A production unlock expired while a transaction was open.
+    #[error(
+        "the write unlock expired; finish the open transaction with COMMIT or ROLLBACK, then the connection re-locks"
+    )]
+    UnlockExpired,
     /// `unlock_writes` was given the wrong confirmation text.
     #[error("that does not match the connection name; writes stay locked")]
     ConfirmationMismatch,
@@ -483,9 +488,20 @@ impl App {
             .get(id)
             .and_then(|live| live.unlock_until)
             .is_some_and(|until| until <= Instant::now());
-        if expired {
-            self.reopen(id, true).await?;
+        if !expired {
+            return Ok(());
         }
+        // Re-locking reopens the session, which would silently roll back an
+        // open transaction. Refuse the statement instead and let the user end
+        // the transaction deliberately; the next statement re-locks.
+        let in_transaction = match self.live.get(id) {
+            Some(live) => live.session.in_transaction().await,
+            None => false,
+        };
+        if in_transaction {
+            return Err(AppError::UnlockExpired);
+        }
+        self.reopen(id, true).await?;
         Ok(())
     }
 

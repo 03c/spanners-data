@@ -951,3 +951,39 @@ async fn a_connection_with_an_unknown_driver_is_refused_at_save_time() {
     }
     assert!(app.connections().is_empty());
 }
+
+#[tokio::test]
+async fn an_expired_unlock_does_not_silently_drop_a_transaction() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+    app.set_unlock_idle(Duration::from_millis(30));
+    app.unlock_writes(&id, "live").await.unwrap();
+    app.begin(&id).await.unwrap();
+    let mut run = match app
+        .run(&id, "INSERT INTO t VALUES (1)", false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Re-locking would reopen the session and roll the transaction back
+    // behind the user's back, so the statement is refused instead.
+    let err = app.run(&id, "SELECT 1", false).await.unwrap_err();
+    assert!(matches!(err, AppError::UnlockExpired), "{err:?}");
+    assert!(app.in_transaction(&id).await.unwrap());
+
+    // Ending the transaction is allowed, and the next statement re-locks.
+    app.commit(&id).await.unwrap();
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (2)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+    assert!(app.session_info(&id).unwrap().read_only);
+}
