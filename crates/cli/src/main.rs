@@ -262,6 +262,37 @@ enum ConnectionAction {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Change a saved connection: address, name, profile or limits.
+    Edit {
+        /// Connection id or name.
+        name: String,
+        /// New name.
+        #[arg(long)]
+        rename: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        database: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
+        /// local, staging or production.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Stop fetching after this many rows; 0 means no cap.
+        #[arg(long)]
+        max_rows: Option<u32>,
+        /// Statement timeout in seconds; 0 means none.
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Make the session read-only regardless of the profile.
+        #[arg(long)]
+        read_only: bool,
+        /// Remove a read-only override.
+        #[arg(long)]
+        no_read_only: bool,
+    },
     /// Change the safety profile of an existing connection.
     SetProfile {
         /// Connection id or name.
@@ -806,6 +837,69 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
                 let _ = app.remember_password(&id, &pw);
             }
             println!("{id}");
+            Ok(())
+        }
+        ConnectionAction::Edit {
+            name,
+            rename,
+            host,
+            port,
+            database,
+            username,
+            profile,
+            max_rows,
+            timeout,
+            read_only,
+            no_read_only,
+        } => {
+            let id = resolve(app, &name)?;
+            let mut c = app
+                .connection(&id)
+                .ok_or_else(|| format!("no connection {id}"))?
+                .clone();
+            let before = c.clone();
+
+            if let Some(rename) = rename {
+                c.name = rename;
+            }
+            if let Some(host) = host {
+                c.host = Some(host);
+            }
+            if let Some(port) = port {
+                c.port = Some(port);
+            }
+            if let Some(database) = database {
+                c.database = Some(database);
+            }
+            if let Some(username) = username {
+                c.username = Some(username);
+            }
+            if let Some(profile) = profile {
+                c.profile = parse_profile(&profile)?;
+            }
+            if let Some(n) = max_rows {
+                c.overrides.max_rows = Some(n);
+            }
+            if let Some(secs) = timeout {
+                c.overrides.timeout_ms = Some(secs.saturating_mul(1_000));
+            }
+            if read_only {
+                c.overrides.read_only = Some(true);
+            }
+            if no_read_only {
+                c.overrides.read_only = Some(false);
+            }
+
+            if c == before {
+                return Err(
+                    "nothing to change; pass --host, --port, --database, --username, --profile, \
+                     --rename, --max-rows, --timeout, --read-only or --no-read-only"
+                        .into(),
+                );
+            }
+            app.upsert_connection(c.clone())
+                .map_err(|e| e.to_string())?;
+            println!("{}", c.id);
             Ok(())
         }
         ConnectionAction::SetProfile {

@@ -1718,3 +1718,102 @@ fn clearing_history_keeps_saved_queries() {
     let list = spanners(f.home(), &["saved", "list"]);
     assert!(stdout(&list).contains("keep"), "{}", stdout(&list));
 }
+
+#[test]
+fn connections_edit_changes_the_address_and_the_limits() {
+    let f = Fixture::new();
+    let added = spanners(
+        f.home(),
+        &[
+            "connections",
+            "add",
+            "live",
+            "--url",
+            "postgres://reader@db.example.com:5432/app",
+            "--profile",
+            "staging",
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let out = spanners(
+        f.home(),
+        &[
+            "connections",
+            "edit",
+            "live",
+            "--host",
+            "db2.example.com",
+            "--port",
+            "6432",
+            "--max-rows",
+            "50",
+            "--timeout",
+            "5",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let shown = spanners(f.home(), &["connections", "show", "live"]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let text = stdout(&shown);
+    assert!(text.contains("db2.example.com:6432/app"), "{text}");
+    // The cap is the thing that will actually be used, not just a number in
+    // a config file.
+    assert!(text.contains("row cap       50"), "{text}");
+    assert!(text.contains("timeout       5s"), "{text}");
+}
+
+#[test]
+fn connections_edit_renames_and_refuses_an_empty_change() {
+    let f = Fixture::new();
+    f.add("one", "local");
+    f.add("two", "local");
+
+    let nothing = spanners(f.home(), &["connections", "edit", "one"]);
+    assert!(!nothing.status.success());
+    assert!(
+        stderr(&nothing).contains("nothing to change"),
+        "{}",
+        stderr(&nothing)
+    );
+
+    let renamed = spanners(
+        f.home(),
+        &["connections", "edit", "one", "--rename", "three"],
+    );
+    assert!(renamed.status.success(), "{}", stderr(&renamed));
+
+    // The old name is gone, and the new one resolves.
+    let old = spanners(f.home(), &["connections", "show", "one"]);
+    assert!(!old.status.success());
+    let new = spanners(f.home(), &["connections", "show", "three"]);
+    assert!(new.status.success(), "{}", stderr(&new));
+
+    // Names are how everything addresses a connection, so a collision is an
+    // error rather than two connections the user cannot tell apart.
+    let clash = spanners(
+        f.home(),
+        &["connections", "edit", "three", "--rename", "two"],
+    );
+    assert!(!clash.status.success());
+    assert!(stderr(&clash).contains("already"), "{}", stderr(&clash));
+}
+
+#[test]
+fn editing_a_connection_to_production_makes_writes_fail() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+
+    let out = spanners(
+        f.home(),
+        &["connections", "edit", "demo", "--profile", "production"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let read = f.query("demo", "SELECT count(*) FROM t");
+    assert!(read.status.success(), "{}", stderr(&read));
+    let write = f.query("demo", "INSERT INTO t VALUES (1)");
+    assert!(!write.status.success());
+}

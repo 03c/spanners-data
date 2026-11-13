@@ -13,8 +13,8 @@ Plan of record. Status: draft for review.
 | `spanners-driver-mysql` | streaming, `KILL QUERY` cancel, `max_execution_time`, fetch-stop caps with bounded resync, schema, `EXPLAIN FORMAT=JSON` |
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
-| `spanners-cli` | `spanners` binary: connections (add, show, set-profile, test, import from DBeaver), query (table/csv/jsonl), export, history, check, schema, explain, saved; same config, history and policy as the app |
-| Tests | 260: 118 core, 41 app, 4 app end-to-end against real servers, 55 CLI (52 process-level, 2 against real servers), 17 driver integration, 25 driver unit/registry |
+| `spanners-cli` | `spanners` binary: connections (add, edit, show, set-profile, test, import from DBeaver), query (table/csv/jsonl), export, history, check, schema, explain, saved; same config, history and policy as the app |
+| Tests | 263: 118 core, 41 app, 4 app end-to-end against real servers, 58 CLI (55 process-level, 2 against real servers), 17 driver integration, 25 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
