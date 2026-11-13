@@ -1015,20 +1015,40 @@ fn history(app: &App, limit: u32, search: Option<&str>) -> Result<(), String> {
 
 async fn check(app: &App, connection: &str, sql: &str) -> Result<(), String> {
     let id = resolve(app, connection)?;
-    match app.judge(&id, sql).await.map_err(|e| e.to_string())? {
-        Verdict::Allow => {
-            println!("allow");
-            Ok(())
-        }
-        Verdict::Confirm { reasons } => {
-            print_reasons("needs confirmation", &reasons);
-            Ok(())
-        }
-        Verdict::Block { reasons } => {
-            print_reasons("blocked", &reasons);
-            std::process::exit(2);
+    // Judge what would actually run. A buffer is submitted one statement at a
+    // time, so judging the whole buffer as one unit would report a block that
+    // `query` never produces.
+    let statements = app.statements(&id, sql).map_err(|e| e.to_string())?;
+    if statements.is_empty() {
+        return Err("there is no statement to check".into());
+    }
+    let many = statements.len() > 1;
+    let mut blocked = false;
+    for (i, statement) in statements.iter().enumerate() {
+        let prefix = if many {
+            format!("{}/{} ", i + 1, statements.len())
+        } else {
+            String::new()
+        };
+        match app
+            .judge(&id, &statement.sql)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Verdict::Allow => println!("{prefix}allow"),
+            Verdict::Confirm { reasons } => {
+                print_reasons(&format!("{prefix}needs confirmation"), &reasons)
+            }
+            Verdict::Block { reasons } => {
+                print_reasons(&format!("{prefix}blocked"), &reasons);
+                blocked = true;
+            }
         }
     }
+    if blocked {
+        std::process::exit(2);
+    }
+    Ok(())
 }
 
 async fn schema(

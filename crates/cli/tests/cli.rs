@@ -977,3 +977,27 @@ fn an_ambiguous_saved_query_name_asks_for_the_id() {
         stderr(&out)
     );
 }
+
+#[test]
+fn check_judges_each_statement_in_a_buffer() {
+    let f = Fixture::new();
+    f.add("live", "production");
+
+    // Both reads are fine: production's "one statement per buffer" rule is
+    // about a single submission, and the CLI submits them one at a time.
+    let reads = spanners(
+        f.home(),
+        &["check", "-c", "live", "--sql", "SELECT 1; SELECT 2"],
+    );
+    assert!(reads.status.success(), "{}", stderr(&reads));
+    assert_eq!(stdout(&reads).lines().count(), 2, "{}", stdout(&reads));
+
+    // The chained DDL is caught, and named.
+    let mixed = spanners(
+        f.home(),
+        &["check", "-c", "live", "--sql", "SELECT 1; DROP TABLE t"],
+    );
+    assert!(!mixed.status.success());
+    assert!(stderr(&mixed).contains("2/2 blocked"), "{}", stderr(&mixed));
+    assert!(stdout(&mixed).contains("1/2 allow"), "{}", stdout(&mixed));
+}

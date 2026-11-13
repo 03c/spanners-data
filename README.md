@@ -57,7 +57,7 @@ $S saved add "top users" --sql "SELECT * FROM users ORDER BY score DESC LIMIT 20
 $S saved run "top users" -c local
 
 $S history            # what you ran
-$S check -c live --sql "DROP TABLE users"   # classify without running; exit 2 = blocked
+$S check -c live --sql "SELECT 1; DROP TABLE users"  # judges each statement; exit 2 = blocked
 ```
 
 `--home <dir>` keeps config and history in one place, which is handy for demos
