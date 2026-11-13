@@ -202,6 +202,11 @@ impl App {
     /// Open the app's state in `dir` (`config.toml` + `spanners.db`).
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
+        // A first run has no directory yet, and `--home` may point anywhere.
+        // Creating it is part of opening: asking a user to `mkdir` before the
+        // first command is a papercut with no upside.
+        std::fs::create_dir_all(dir)
+            .map_err(|e| AppError::Io(format!("could not create {}: {e}", dir.display())))?;
         let config_path = ConfigStore::new(dir.join("config.toml"));
         let config = config_path.load()?;
         let history = Store::open(dir.join("spanners.db"))?;

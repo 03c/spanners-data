@@ -276,7 +276,9 @@ async fn run(cli: Cli) -> Result<(), String> {
         None => spanners_core::config::ConfigStore::default_dir()
             .ok_or_else(|| "could not find a state directory; pass --home".to_string())?,
     };
-    let mut app = App::open(&dir).map_err(|e| format!("could not open {}: {e}", dir.display()))?;
+    // Every error below names the file or object it is about, so there is no
+    // outer "could not open <dir>" prefix to add (and duplicate).
+    let mut app = App::open(&dir).map_err(|e| e.to_string())?;
 
     match cli.command {
         Command::Connections { action } => connections(&mut app, action).await,

@@ -25,6 +25,18 @@ pub enum StoreError {
         #[source]
         source: rusqlite::Error,
     },
+    /// The file exists but is not a SQLite database, or a schema migration on
+    /// it failed. The message has to say what to do: the user cannot open the
+    /// app to fix it, and "file is not a database" with no filename sends them
+    /// hunting through the wrong directory.
+    #[error(
+        "{path} is not a usable history database ({source}); move it aside and Spanners will create a new one"
+    )]
+    Corrupt {
+        path: PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error("{0}")]
@@ -201,7 +213,14 @@ impl Store {
             path: path.clone(),
             source,
         })?;
-        Self::from_connection(conn)
+        // Pragma and migration failures happen after a successful open, so they
+        // arrive as a bare `Sql` error. A truncated file or something that is
+        // not SQLite at all fails here, and the path is what makes the message
+        // actionable.
+        Self::from_connection(conn).map_err(|e| match e {
+            StoreError::Sql(source) => StoreError::Corrupt { path, source },
+            other => other,
+        })
     }
 
     /// In-memory store, for tests and for the "no config dir" fallback.
@@ -739,6 +758,21 @@ mod tests {
         let err = library.find("report").unwrap_err();
         assert!(err.contains("matches 2 saved queries"), "{err}");
         assert!(err.contains("use the id"), "{err}");
+    }
+
+    #[test]
+    fn a_corrupt_file_names_itself_and_the_fix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("spanners.db");
+        std::fs::write(&path, b"not a database, just some bytes").unwrap();
+
+        let message = Store::open(&path).unwrap_err().to_string();
+        assert!(
+            message.contains("not a usable history database"),
+            "{message}"
+        );
+        assert!(message.contains("spanners.db"), "{message}");
+        assert!(message.contains("move it aside"), "{message}");
     }
 
     #[test]

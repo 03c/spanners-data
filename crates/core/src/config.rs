@@ -283,7 +283,8 @@ impl ConfigStore {
     /// A missing file is a first run, not an error.
     pub fn load(&self) -> Result<AppConfig, ConfigError> {
         match fs::read_to_string(&self.path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string())),
+            Ok(text) => toml::from_str(&text)
+                .map_err(|e| ConfigError::Parse(format!("{}: {e}", self.path.display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppConfig::default()),
             Err(e) => Err(ConfigError::Read {
                 path: self.path.clone(),
@@ -485,6 +486,9 @@ mod tests {
         let s = store(&dir);
         std::fs::create_dir_all(s.path().parent().unwrap()).unwrap();
         std::fs::write(s.path(), "this is not toml [").unwrap();
+        let message = s.load().unwrap_err().to_string();
         assert!(matches!(s.load(), Err(ConfigError::Parse(_))));
+        // The path is the actionable part: the user has to edit this file.
+        assert!(message.contains("config.toml"), "{message}");
     }
 }

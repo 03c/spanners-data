@@ -1001,3 +1001,28 @@ fn check_judges_each_statement_in_a_buffer() {
     assert!(stderr(&mixed).contains("2/2 blocked"), "{}", stderr(&mixed));
     assert!(stdout(&mixed).contains("1/2 allow"), "{}", stdout(&mixed));
 }
+
+#[test]
+fn a_fresh_home_directory_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("does").join("not").join("exist");
+    let out = spanners(&home, &["connections", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("No connections saved"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(home.join("spanners.db").exists());
+}
+
+#[test]
+fn a_corrupt_history_file_says_which_file_and_what_to_do() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("spanners.db"), b"not sqlite").unwrap();
+    let out = spanners(dir.path(), &["connections", "list"]);
+    assert!(!out.status.success());
+    let message = stderr(&out);
+    assert!(message.contains("spanners.db"), "{message}");
+    assert!(message.contains("move it aside"), "{message}");
+}

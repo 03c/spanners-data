@@ -988,3 +988,13 @@ async fn an_expired_unlock_does_not_silently_drop_a_transaction() {
     ));
     assert!(app.session_info(&id).unwrap().read_only);
 }
+
+#[tokio::test]
+async fn opening_a_directory_that_does_not_exist_creates_it() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("nested").join("state");
+    let app = App::open_with_secrets(&dir, Box::new(MemorySecrets::new())).expect("open");
+    assert!(app.connections().is_empty());
+    // The history database is the thing that needs the directory to exist.
+    assert!(dir.join("spanners.db").exists());
+}
