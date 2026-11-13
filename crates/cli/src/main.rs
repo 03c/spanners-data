@@ -252,6 +252,27 @@ enum ConnectionAction {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Import connections from another SQL client.
+    Import {
+        /// The client to import from.
+        #[arg(long, value_enum, default_value_t = ImportSource::Dbeaver)]
+        from: ImportSource,
+        /// Its data-sources.json. Found automatically when omitted.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Force every imported connection to this profile instead of the
+        /// host-based guess (loopback = local, anything else = staging).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Show what would be imported without saving anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ImportSource {
+    Dbeaver,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -458,6 +479,87 @@ fn folder_id(app: &App, name: &str) -> Result<i64, String> {
     app.create_folder(name, None).map_err(|e| e.to_string())
 }
 
+/// Import from another client. Nothing is saved until the whole file has been
+/// read and checked, so a bad file leaves the config untouched.
+async fn import_connections(
+    app: &mut App,
+    from: ImportSource,
+    path: Option<PathBuf>,
+    profile: Option<String>,
+    dry_run: bool,
+) -> Result<(), String> {
+    let ImportSource::Dbeaver = from;
+    let profile = profile.as_deref().map(parse_profile).transpose()?;
+
+    let file = match path {
+        Some(path) => path,
+        None => spanners_core::import::find_dbeaver_file().ok_or_else(|| {
+            let looked: Vec<String> = spanners_core::import::dbeaver_candidates()
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect();
+            format!(
+                "could not find DBeaver's data-sources.json; pass --path. Looked in:\n{}",
+                looked.join("\n")
+            )
+        })?,
+    };
+
+    let imported =
+        spanners_core::import::dbeaver_from_file_with(&file, profile).map_err(|e| e.to_string())?;
+    if imported.connections.is_empty() && imported.skipped.is_empty() {
+        return Err(format!("{} has no connections in it", file.display()));
+    }
+
+    for note in &imported.notes {
+        eprintln!("note: {note}");
+    }
+    for skipped in &imported.skipped {
+        eprintln!("skipped {}: {}", skipped.name, skipped.reason);
+    }
+
+    let mut added = 0;
+    for connection in imported.connections {
+        let existing = app
+            .connections()
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(&connection.name))
+            .map(|c| c.name.clone());
+        if let Some(existing) = existing {
+            eprintln!(
+                "skipped {}: there is already a connection called {existing}",
+                connection.name
+            );
+            continue;
+        }
+        let where_ = match (&connection.host, &connection.database) {
+            (Some(host), Some(db)) => format!("{host}/{db}"),
+            (Some(host), None) => host.clone(),
+            (None, Some(db)) => db.clone(),
+            (None, None) => String::new(),
+        };
+        println!(
+            "{}\t{}\t{}\t{}",
+            connection.name,
+            connection.driver,
+            connection.profile.as_str(),
+            where_
+        );
+        if !dry_run {
+            app.upsert_connection(connection)
+                .map_err(|e| format!("could not save the imported connections: {e}"))?;
+        }
+        added += 1;
+    }
+
+    if dry_run {
+        eprintln!("would import {added} connection(s); nothing saved (--dry-run)");
+    } else {
+        eprintln!("imported {added} connection(s) from {}", file.display());
+    }
+    Ok(())
+}
+
 async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), String> {
     match action {
         ConnectionAction::List => {
@@ -551,6 +653,12 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
             println!("removed {id}");
             Ok(())
         }
+        ConnectionAction::Import {
+            from,
+            path,
+            profile,
+            dry_run,
+        } => import_connections(app, from, path, profile, dry_run).await,
         ConnectionAction::Test {
             connection,
             password,

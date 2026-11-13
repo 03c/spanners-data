@@ -18,8 +18,9 @@ the shell decision, which is the only remaining blocker.
 | Postgres driver | done: streaming, `pg_cancel_backend`, statement timeout, caps |
 | MySQL driver | done: streaming, `KILL QUERY`, `max_execution_time`, caps |
 | App services (`spanners-app`) | done: connect, guarded run, cancel, schema, explain, export, history, saved queries |
-| CLI (`spanners`) | done: connections (add from URL, set-profile), query (single statement or a whole script), export, history, saved queries, check, schema, explain — same config, history and policy as the app |
+| CLI (`spanners`) | done: connections (add from URL, set-profile, test, import from DBeaver), query (single statement or a whole script), export, history, saved queries, check, schema, explain — same config, history and policy as the app |
 | History + saved queries | done: one SQLite file, shared search, 10k/90-day prune |
+| DBeaver import | done: `connections import` reads `data-sources.json`; never passwords; loopback = local, network = staging |
 | Export | done: streaming CSV and JSON Lines, cap-aware, backs clipboard copy |
 | Dialect keywords | done: per-driver lists for highlighting and autocomplete |
 | Autocomplete | done: schema-aware ranking (columns of tables in scope, then tables, functions, keywords) |
@@ -39,6 +40,9 @@ S=target/release/spanners
 # A connection from a URL. The password goes to the OS keychain when there is
 # one, and is never written to config.toml.
 $S connections add local --url "postgres://me@localhost/app?sslmode=require"
+
+# Or bring the ones you already have. Found automatically, or pass --path.
+$S connections import --from dbeaver --dry-run
 
 # Query, script, export, browse, explain.
 $S query -c local --sql "SELECT * FROM users LIMIT 5"

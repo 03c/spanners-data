@@ -1026,3 +1026,127 @@ fn a_corrupt_history_file_says_which_file_and_what_to_do() {
     assert!(message.contains("spanners.db"), "{message}");
     assert!(message.contains("move it aside"), "{message}");
 }
+
+const DBEAVER_SAMPLE: &str = r#"{
+  "connections": {
+    "pg": {
+      "provider": "postgresql",
+      "name": "app dev",
+      "configuration": {
+        "host": "localhost", "port": 5432, "database": "app", "user": "me",
+        "url": "jdbc:postgresql://localhost:5432/app"
+      }
+    },
+    "my": {
+      "provider": "mysql",
+      "name": "shop",
+      "configuration": {
+        "host": "db.example.com", "port": 3306, "database": "shop",
+        "url": "jdbc:mysql://db.example.com:3306/shop?useSSL=false"
+      }
+    },
+    "lite": {
+      "provider": "sqlite",
+      "name": "notes",
+      "configuration": { "url": "jdbc:sqlite:/tmp/notes.db" }
+    },
+    "ora": { "provider": "oracle", "name": "legacy", "configuration": {} }
+  }
+}"#;
+
+#[test]
+fn dbeaver_connections_are_imported_with_a_safe_profile_guess() {
+    let f = Fixture::new();
+    let file = f.home().join("data-sources.json");
+    std::fs::write(&file, DBEAVER_SAMPLE).unwrap();
+    let path = file.to_str().unwrap();
+
+    // A dry run reports what it would do and saves nothing.
+    let dry = spanners(
+        f.home(),
+        &["connections", "import", "--path", path, "--dry-run"],
+    );
+    assert!(dry.status.success(), "{}", stderr(&dry));
+    let text = stdout(&dry);
+    assert!(text.contains("app dev\tpostgres\tlocal"), "{text}");
+    assert!(text.contains("shop\tmysql\tstaging"), "{text}");
+    assert!(text.contains("notes\tsqlite\tlocal"), "{text}");
+    assert!(stderr(&dry).contains("skipped legacy"), "{}", stderr(&dry));
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert!(
+        stdout(&list).contains("No connections saved"),
+        "{}",
+        stdout(&list)
+    );
+
+    let real = spanners(f.home(), &["connections", "import", "--path", path]);
+    assert!(real.status.success(), "{}", stderr(&real));
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert_eq!(stdout(&list).lines().count(), 3, "{}", stdout(&list));
+
+    // Importing twice does not duplicate anything.
+    let again = spanners(f.home(), &["connections", "import", "--path", path]);
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert!(
+        stderr(&again).contains("already a connection"),
+        "{}",
+        stderr(&again)
+    );
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert_eq!(stdout(&list).lines().count(), 3, "{}", stdout(&list));
+}
+
+#[test]
+fn import_can_force_a_profile() {
+    let f = Fixture::new();
+    let file = f.home().join("data-sources.json");
+    std::fs::write(&file, DBEAVER_SAMPLE).unwrap();
+
+    let out = spanners(
+        f.home(),
+        &[
+            "connections",
+            "import",
+            "--path",
+            file.to_str().unwrap(),
+            "--profile",
+            "production",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("app dev\tpostgres\tproduction"),
+        "{}",
+        stdout(&out)
+    );
+
+    // The imported connection really is read-only: a write is refused.
+    let write = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "notes",
+            "--sql",
+            "CREATE TABLE t (x int)",
+        ],
+    );
+    assert!(!write.status.success());
+}
+
+#[test]
+fn importing_a_file_without_connections_is_an_error() {
+    let f = Fixture::new();
+    let file = f.home().join("data-sources.json");
+    std::fs::write(&file, r#"{"folders":{}}"#).unwrap();
+    let out = spanners(
+        f.home(),
+        &["connections", "import", "--path", file.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("no 'connections' object"),
+        "{}",
+        stderr(&out)
+    );
+}

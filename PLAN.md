@@ -13,8 +13,8 @@ Plan of record. Status: draft for review.
 | `spanners-driver-mysql` | streaming, `KILL QUERY` cancel, `max_execution_time`, fetch-stop caps with bounded resync, schema, `EXPLAIN FORMAT=JSON` |
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
-| `spanners-cli` | `spanners` binary: connections, query (table/csv/jsonl), export, history, check, schema, explain, saved; same config, history and policy as the app |
-| Tests | 230: 105 core, 41 app, 4 app end-to-end against real servers, 39 CLI (36 process-level), 17 driver integration, 24 driver unit/registry |
+| `spanners-cli` | `spanners` binary: connections (add, set-profile, test, import from DBeaver), query (table/csv/jsonl), export, history, check, schema, explain, saved; same config, history and policy as the app |
+| Tests | 241: 113 core, 41 app, 4 app end-to-end against real servers, 42 CLI (39 process-level), 17 driver integration, 24 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -317,6 +317,15 @@ disconnecting with an open transaction rolls back (with a confirm prompt).
   10k rows / 90 days. Saved queries are a folder tree (`folder` + `query` tables,
   `ON DELETE SET NULL` on folder deletion) searchable by name and body. Secrets
   are redacted from any logged DSN.
+- Import: `spanners connections import` reads DBeaver's `data-sources.json`
+  (newest `DBeaverData/workspace*/General/.dbeaver/` layout or the legacy
+  `~/.dbeaver` one), mapping `postgresql`/`mysql`/`mariadb`/`sqlite` providers.
+  Passwords are never imported — they are encrypted in DBeaver's file, and a
+  readable file must not become a credential leak. The profile is guessed from
+  the host: loopback and SQLite files are `local`, anything else is `staging`,
+  so an imported production database is not writable by default. JDBC-only
+  parameters (`useSSL`, `serverTimezone`) are dropped with a note; `sslmode`
+  survives.
 
 ### 4.5 UI surface (v1)
 
