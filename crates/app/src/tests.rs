@@ -525,3 +525,79 @@ async fn an_export_lands_in_history() {
     assert_eq!(history[0].1.row_count, Some(3));
     assert!(history[0].1.error.is_none());
 }
+
+#[tokio::test]
+async fn the_editor_can_run_the_statement_under_the_cursor() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    let buffer = "CREATE TABLE t (id int);\nINSERT INTO t VALUES (7);\nSELECT id FROM t";
+    // A cursor inside the SELECT resolves to the SELECT, not the whole buffer.
+    let offset = buffer.find("SELECT id").unwrap() + 3;
+    let statement = app.statement_at(&id, buffer, offset).unwrap().unwrap();
+    assert_eq!(statement.sql, "SELECT id FROM t");
+
+    // Run the first two statements one at a time, the way a user stepping
+    // through a script would.
+    for needle in ["CREATE TABLE", "INSERT INTO"] {
+        let at = buffer.find(needle).unwrap() + 2;
+        let mut run = match app.run_statement_at(&id, buffer, at, false).await.unwrap() {
+            RunOutcome::Running(run) => run,
+            other => panic!("expected to run, got {other:?}"),
+        };
+        drain(&mut run).await;
+    }
+
+    let mut run = match app
+        .run_statement_at(&id, buffer, offset, false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    let events = drain(&mut run).await;
+    let rows = events
+        .iter()
+        .map(|e| match e {
+            QueryEvent::Batch { rows, .. } => rows.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(rows, 1);
+
+    assert_eq!(app.history(10).unwrap().len(), 3);
+    assert_eq!(app.statements(&id, buffer).unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn running_with_no_statement_under_the_cursor_sends_nothing() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    let outcome = app.run_statement_at(&id, "  \n  ", 1, false).await.unwrap();
+    assert!(matches!(outcome, RunOutcome::Blocked { .. }));
+    assert!(app.history(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn statement_offsets_are_dialect_aware() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+
+    // SQLite does not dollar-quote, so the `;` splits; the point is only that
+    // the app asks the connection's dialect rather than assuming Postgres.
+    let sql = "SELECT 1; SELECT 2";
+    assert_eq!(app.statements(&id, sql).unwrap().len(), 2);
+}

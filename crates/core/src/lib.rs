@@ -6,6 +6,7 @@ pub mod executor;
 pub mod export;
 pub mod history;
 pub mod policy;
+pub mod split;
 
 pub use config::{AppConfig, ConfigError, ConfigStore, Connection};
 pub use executor::{execute_guarded, Gate};
@@ -14,3 +15,4 @@ pub use history::{
     Folder, HistoryEntry, HitKind, Library, SavedQuery, SearchHit, Store, StoreError,
 };
 pub use policy::{Classification, Policy, Profile, StmtKind, Verdict, Violation};
+pub use split::{split, statement_at, Statement};

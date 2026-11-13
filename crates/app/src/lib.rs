@@ -376,6 +376,46 @@ impl App {
         self.live.get(id).map(|l| &l.info)
     }
 
+    /// Split a buffer into statements for the editor. Uses the connection's
+    /// dialect so dollar-quoting and backslash escapes are read correctly.
+    pub fn statements(&self, id: &str, sql: &str) -> Result<Vec<spanners_core::Statement>> {
+        Ok(spanners_core::split(sql, self.dialect_of(id)?))
+    }
+
+    /// The statement under the cursor. This is the "run what I am looking at"
+    /// action; it never guesses across a string or comment boundary.
+    pub fn statement_at(
+        &self,
+        id: &str,
+        sql: &str,
+        offset: usize,
+    ) -> Result<Option<spanners_core::Statement>> {
+        Ok(spanners_core::statement_at(
+            sql,
+            offset,
+            self.dialect_of(id)?,
+        ))
+    }
+
+    /// Run only the statement under the cursor, through the same gate as
+    /// [`App::run`].
+    pub async fn run_statement_at(
+        &mut self,
+        id: &str,
+        sql: &str,
+        offset: usize,
+        confirmed: bool,
+    ) -> Result<RunOutcome> {
+        match self.statement_at(id, sql, offset)? {
+            Some(statement) => self.run(id, &statement.sql, confirmed).await,
+            // Nothing to run: report it as blocked-by-nothing rather than
+            // sending an empty string to the server.
+            None => Ok(RunOutcome::Blocked {
+                reasons: Vec::new(),
+            }),
+        }
+    }
+
     /// Classify without executing, for editor linting.
     pub fn judge(&self, id: &str, sql: &str) -> Result<spanners_core::Verdict> {
         let connection = self
@@ -639,6 +679,25 @@ impl App {
     pub fn delete_folder(&self, id: i64) -> Result<()> {
         let store = self.lock_store()?;
         Ok(store.delete_folder(id)?)
+    }
+
+    /// The dialect of a connection, even before it is open.
+    fn dialect_of(&self, id: &str) -> Result<Dialect> {
+        if let Some(info) = self.session_info(id) {
+            return Ok(info.dialect);
+        }
+        let connection = self
+            .connection(id)
+            .ok_or_else(|| AppError::UnknownConnection(id.into()))?;
+        connection.dialect().map_or_else(
+            || {
+                self.registry
+                    .get(&connection.driver)
+                    .map(|d| d.dialect())
+                    .ok_or_else(|| AppError::UnknownDriver(connection.driver.clone()))
+            },
+            Ok,
+        )
     }
 
     fn lock_store(&self) -> Result<std::sync::MutexGuard<'_, Store>> {

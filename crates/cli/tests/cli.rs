@@ -264,3 +264,151 @@ fn removing_a_connection_removes_it_from_the_list() {
     let list = spanners(f.home(), &["connections", "list"]);
     assert!(!stdout(&list).contains(&id), "{}", stdout(&list));
 }
+
+#[test]
+fn statement_selection_runs_only_the_named_statement() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+
+    // The first statement creates the table; the second is the one we ask for.
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+            "--statement",
+            "1",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let insert = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+            "--statement",
+            "2",
+        ],
+    );
+    // Statement 2 is the INSERT; the CREATE in the same buffer is not re-run.
+    assert!(insert.status.success(), "{}", stderr(&insert));
+
+    let select = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "SELECT id FROM t",
+            "--statement",
+            "1",
+        ],
+    );
+    assert!(select.status.success(), "{}", stderr(&select));
+    assert!(stdout(&select).contains("1"), "{}", stdout(&select));
+}
+
+#[test]
+fn asking_for_a_statement_that_does_not_exist_is_a_clear_error() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "SELECT 1;",
+            "--statement",
+            "5",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("statement 5 does not exist"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn export_refuses_a_statement_the_profile_blocks() {
+    let f = Fixture::new();
+    f.add("seed", "local");
+    f.query("seed", "SELECT 1");
+    f.add("live", "production");
+
+    let path = f.home().join("out.csv");
+    let out = spanners(
+        f.home(),
+        &[
+            "export",
+            "--connection",
+            "live",
+            "--sql",
+            "CREATE TABLE nope (id int)",
+            "--out",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("blocked by the connection profile"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!path.exists(), "a blocked export must not create the file");
+}
+
+#[test]
+fn export_can_confirm_a_statement_with_yes() {
+    let f = Fixture::new();
+    f.add("seed", "local");
+    f.query("seed", "CREATE TABLE t (id INTEGER)");
+    f.query("seed", "INSERT INTO t VALUES (1), (2)");
+    f.add("stage", "staging");
+
+    let path = f.home().join("out.csv");
+    let refused = spanners(
+        f.home(),
+        &[
+            "export",
+            "--connection",
+            "stage",
+            "--sql",
+            "UPDATE t SET id = id",
+            "--out",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("needs confirmation"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let allowed = spanners(
+        f.home(),
+        &[
+            "export",
+            "--connection",
+            "stage",
+            "--sql",
+            "UPDATE t SET id = id",
+            "--out",
+            path.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+}

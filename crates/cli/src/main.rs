@@ -57,6 +57,9 @@ enum Command {
         /// Maximum rows to print, overriding the connection profile.
         #[arg(long)]
         max_rows: Option<u32>,
+        /// Run only the Nth statement in the buffer (1-based).
+        #[arg(long)]
+        statement: Option<usize>,
     },
     /// Stream a query straight to a file, honouring the profile's caps.
     Export {
@@ -72,6 +75,9 @@ enum Command {
         /// Answer yes to a confirmation the profile would otherwise ask for.
         #[arg(long)]
         yes: bool,
+        /// Export only the Nth statement in the buffer (1-based).
+        #[arg(long)]
+        statement: Option<usize>,
         #[arg(long)]
         password: Option<String>,
     },
@@ -166,9 +172,21 @@ async fn run(cli: Cli) -> Result<(), String> {
             yes,
             password,
             max_rows,
+            statement,
         } => {
-            let sql = read_sql(&sql)?;
-            query(&mut app, &connection, &sql, format, yes, password, max_rows).await
+            query(
+                &mut app,
+                QueryArgs {
+                    connection,
+                    sql: read_sql(&sql)?,
+                    format,
+                    yes,
+                    password,
+                    max_rows,
+                    statement,
+                },
+            )
+            .await
         }
         Command::Export {
             connection,
@@ -176,10 +194,22 @@ async fn run(cli: Cli) -> Result<(), String> {
             out,
             format,
             yes,
+            statement,
             password,
         } => {
-            let sql = read_sql(&sql)?;
-            export(&mut app, &connection, &sql, &out, format, yes, password).await
+            export(
+                &mut app,
+                ExportArgs {
+                    connection,
+                    sql: read_sql(&sql)?,
+                    out,
+                    format,
+                    yes,
+                    statement,
+                    password,
+                },
+            )
+            .await
         }
         Command::History { limit, search } => history(&app, limit, search.as_deref()),
         Command::Check { connection, sql } => check(&app, &connection, &sql),
@@ -265,19 +295,35 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
     }
 }
 
-async fn query(
-    app: &mut App,
-    connection: &str,
-    sql: &str,
+struct QueryArgs {
+    connection: String,
+    sql: String,
     format: Output,
     yes: bool,
     password: Option<String>,
     max_rows: Option<u32>,
-) -> Result<(), String> {
-    let id = resolve(app, connection)?;
+    statement: Option<usize>,
+}
+
+async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
+    let QueryArgs {
+        connection,
+        sql,
+        format,
+        yes,
+        password,
+        max_rows,
+        statement,
+    } = args;
+    let id = resolve(app, &connection)?;
     app.connect(&id, password)
         .await
         .map_err(|e| e.to_string())?;
+    let sql = match statement {
+        Some(n) => pick_statement(app, &id, &sql, n)?,
+        None => sql,
+    };
+    let sql = sql.as_str();
 
     // CSV and JSON Lines go through the export engine, so a NULL, an empty
     // string and duplicate column names mean the same thing here as in a file.
@@ -385,19 +431,36 @@ async fn query(
     }
 }
 
-async fn export(
-    app: &mut App,
-    connection: &str,
-    sql: &str,
-    out: &str,
+struct ExportArgs {
+    connection: String,
+    sql: String,
+    out: String,
     format: Output,
     yes: bool,
+    statement: Option<usize>,
     password: Option<String>,
-) -> Result<(), String> {
-    let id = resolve(app, connection)?;
+}
+
+async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
+    let ExportArgs {
+        connection,
+        sql,
+        out,
+        format,
+        yes,
+        statement,
+        password,
+    } = args;
+    let id = resolve(app, &connection)?;
     app.connect(&id, password)
         .await
         .map_err(|e| e.to_string())?;
+    let sql = match statement {
+        Some(n) => pick_statement(app, &id, &sql, n)?,
+        None => sql,
+    };
+    let sql = sql.as_str();
+    let out = out.as_str();
 
     let opts = ExportOpts {
         format: if format == Output::Jsonl {
@@ -431,16 +494,34 @@ async fn export(
         return Ok(());
     }
 
-    let mut file = tokio::fs::File::create(out)
+    // Write to a sibling temp file and rename on success. A blocked statement
+    // or a failed query must not leave an empty file behind, and an existing
+    // export must survive a failed re-run.
+    let tmp = format!("{out}.spanners-{}", std::process::id());
+    let mut file = tokio::fs::File::create(&tmp)
         .await
-        .map_err(|e| format!("could not create {out}: {e}"))?;
-    let summary = app
+        .map_err(|e| format!("could not create {tmp}: {e}"))?;
+
+    let result = app
         .export_with_exec(&id, sql, ExecOpts::default(), &opts, yes, &mut file)
+        .await;
+    let flushed = file.flush().await;
+    drop(file);
+
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(describe(e));
+        }
+    };
+    if let Err(e) = flushed {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!("could not write {tmp}: {e}"));
+    }
+    tokio::fs::rename(&tmp, out)
         .await
-        .map_err(describe)?;
-    file.flush()
-        .await
-        .map_err(|e| format!("could not write {out}: {e}"))?;
+        .map_err(|e| format!("could not move {tmp} to {out}: {e}"))?;
 
     eprintln!(
         "wrote {} row(s) to {out}{}",
@@ -513,6 +594,20 @@ fn check(app: &App, connection: &str, sql: &str) -> Result<(), String> {
             std::process::exit(2);
         }
     }
+}
+
+/// Select one statement from a buffer, 1-based, the way a user counts them.
+fn pick_statement(app: &App, id: &str, sql: &str, n: usize) -> Result<String, String> {
+    let statements = app.statements(id, sql).map_err(|e| e.to_string())?;
+    statements
+        .get(n.saturating_sub(1))
+        .map(|s| s.sql.clone())
+        .ok_or_else(|| {
+            format!(
+                "statement {n} does not exist; the buffer has {}",
+                statements.len()
+            )
+        })
 }
 
 /// Turn an app error into a message that says what happened, including the
