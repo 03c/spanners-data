@@ -269,3 +269,28 @@ async fn explain_returns_a_plan() {
         .unwrap();
     assert!(!plan.raw.is_empty());
 }
+
+#[tokio::test]
+async fn sqlite_refuses_connection_parameters_it_cannot_honour() {
+    let cfg = ConnConfig {
+        driver: "sqlite".into(),
+        host: None,
+        port: None,
+        database: Some(":memory:".into()),
+        username: None,
+        password: None,
+        params: vec![("sslmode".into(), "require".into())],
+    };
+    let err = match SqliteDriver::new()
+        .connect(&cfg, SessionOpts::default())
+        .await
+    {
+        Ok(_) => panic!("expected the parameter to be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string()
+            .contains("does not support the connection parameter"),
+        "{err}"
+    );
+}

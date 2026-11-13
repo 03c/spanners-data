@@ -106,9 +106,13 @@ enum ConnectionAction {
     Add {
         /// Name to show in the UI and use from the CLI.
         name: String,
-        /// Driver id: postgres, mysql or sqlite.
+        /// Driver id: postgres, mysql or sqlite. Required unless --url is given.
         #[arg(long)]
-        driver: String,
+        driver: Option<String>,
+        /// Paste a connection URL instead of typing each field, e.g.
+        /// postgres://user:pass@host:5432/db?sslmode=require
+        #[arg(long)]
+        url: Option<String>,
         /// Host, or the database file for sqlite.
         #[arg(long)]
         host: Option<String>,
@@ -124,6 +128,9 @@ enum ConnectionAction {
         /// Use this id instead of generating one.
         #[arg(long)]
         id: Option<String>,
+        /// Store this password for the connection (never written to config).
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Delete a connection and its saved password.
     Remove {
@@ -242,26 +249,48 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
         ConnectionAction::Add {
             name,
             driver,
+            url,
             host,
             port,
             database,
             username,
             profile,
             id,
+            password,
         } => {
-            let mut c = Connection::new(name, driver, parse_profile(&profile)?);
+            let profile = parse_profile(&profile)?;
+
+            let (mut connection, url_password) = match url {
+                Some(url) => Connection::from_url(name, &url, profile)
+                    .map_err(|e| format!("could not read the URL: {e}"))?,
+                None => {
+                    let driver = driver.ok_or_else(|| {
+                        "pass --driver (postgres, mysql or sqlite), or --url".to_string()
+                    })?;
+                    let mut c = Connection::new(name, driver, profile);
+                    c.host = host;
+                    c.port = port;
+                    c.database = database;
+                    c.username = username;
+                    // A SQLite path is often typed as `--host`; accept either.
+                    if c.driver == "sqlite" && c.database.is_none() {
+                        c.database = c.host.take();
+                    }
+                    (c, None)
+                }
+            };
             if let Some(id) = id {
-                c.id = id;
+                connection.id = id;
             }
-            c.host = host;
-            c.port = port;
-            c.database = database;
-            c.username = username;
-            if c.driver == "sqlite" && c.database.is_none() {
-                c.database = c.host.take();
+
+            let id = connection.id.clone();
+            app.upsert_connection(connection)
+                .map_err(|e| e.to_string())?;
+
+            // Best effort: no keychain just means the user is asked next time.
+            if let Some(pw) = url_password.or(password) {
+                let _ = app.remember_password(&id, &pw);
             }
-            let id = c.id.clone();
-            app.upsert_connection(c).map_err(|e| e.to_string())?;
             println!("{id}");
             Ok(())
         }

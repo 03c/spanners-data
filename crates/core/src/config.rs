@@ -70,6 +70,12 @@ pub struct Connection {
     pub profile: Profile,
     #[serde(default)]
     pub overrides: PolicyOverrides,
+    /// Driver parameters from the connection URL, e.g. `sslmode=require`.
+    /// Drivers refuse parameters they do not understand rather than ignoring
+    /// them, because silently dropping `sslmode=require` would mean an
+    /// unencrypted connection the user believed was encrypted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<(String, String)>,
 }
 
 impl Connection {
@@ -85,7 +91,25 @@ impl Connection {
             username: None,
             profile,
             overrides: PolicyOverrides::default(),
+            params: Vec::new(),
         }
+    }
+
+    /// Build a connection from a URL, plus the password to hand to the secret
+    /// store. The password is never placed on the returned [`Connection`].
+    pub fn from_url(
+        name: impl Into<String>,
+        url: &str,
+        profile: Profile,
+    ) -> Result<(Self, Option<String>), crate::url::UrlError> {
+        let parsed = crate::url::parse(url)?;
+        let mut connection = Self::new(name, parsed.driver, profile);
+        connection.host = parsed.host;
+        connection.port = parsed.port;
+        connection.database = parsed.database;
+        connection.username = parsed.username;
+        connection.params = parsed.params;
+        Ok((connection, parsed.password))
     }
 
     pub fn dialect(&self) -> Option<Dialect> {
@@ -117,7 +141,7 @@ impl Connection {
             database: self.database.clone(),
             username: self.username.clone(),
             password,
-            params: Vec::new(),
+            params: self.params.clone(),
         }
     }
 }
@@ -285,6 +309,35 @@ mod tests {
 
         let toml = toml::to_string(&c).unwrap();
         assert!(!toml.contains("hunter2"));
+    }
+
+    #[test]
+    fn a_url_becomes_a_connection_without_its_password() {
+        let (c, password) = Connection::from_url(
+            "live",
+            "postgres://ada:hunter2@db.example:5432/app?sslmode=require",
+            Profile::Production,
+        )
+        .unwrap();
+
+        assert_eq!(c.driver, "postgres");
+        assert_eq!(c.host.as_deref(), Some("db.example"));
+        assert_eq!(c.port, Some(5432));
+        assert_eq!(c.database.as_deref(), Some("app"));
+        assert_eq!(c.username.as_deref(), Some("ada"));
+        assert_eq!(password.as_deref(), Some("hunter2"));
+
+        // Parameters are persisted; the password is not.
+        let toml = toml::to_string(&c).unwrap();
+        assert!(toml.contains("sslmode"), "{toml}");
+        assert!(!toml.contains("hunter2"), "{toml}");
+
+        let runtime = c.to_conn_config(password);
+        assert_eq!(
+            runtime.params,
+            [("sslmode".to_string(), "require".to_string())]
+        );
+        assert_eq!(runtime.password.as_deref(), Some("hunter2"));
     }
 
     #[test]

@@ -412,3 +412,45 @@ fn export_can_confirm_a_statement_with_yes() {
     );
     assert!(allowed.status.success(), "{}", stderr(&allowed));
 }
+
+#[test]
+fn a_connection_can_be_added_from_a_url() {
+    let f = Fixture::new();
+    let url = format!("sqlite:{}", f.db());
+    let out = spanners(f.home(), &["connections", "add", "pasted", "--url", &url]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let id = stdout(&out).trim().to_string();
+
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert!(stdout(&list).contains(&id), "{}", stdout(&list));
+
+    // And the pasted connection is usable.
+    let q = f.query("pasted", "SELECT 1");
+    assert!(q.status.success(), "{}", stderr(&q));
+}
+
+#[test]
+fn a_bad_url_is_refused_and_saves_nothing() {
+    let f = Fixture::new();
+    let out = spanners(
+        f.home(),
+        &["connections", "add", "bad", "--url", "oracle://host/db"],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("unsupported scheme"),
+        "{}",
+        stderr(&out)
+    );
+
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert!(!stdout(&list).contains("bad"), "{}", stdout(&list));
+}
+
+#[test]
+fn adding_without_a_driver_or_url_explains_the_choice() {
+    let f = Fixture::new();
+    let out = spanners(f.home(), &["connections", "add", "x", "--host", "h"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("pass --driver"), "{}", stderr(&out));
+}

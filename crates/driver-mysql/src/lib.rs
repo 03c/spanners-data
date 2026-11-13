@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use futures_util::TryStreamExt;
-use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow};
+use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlRow, MySqlSslMode};
 use sqlx::{Column as _, Connection as _, Row as _, TypeInfo as _, ValueRef as _};
 use tokio::sync::mpsc;
 
@@ -24,6 +24,31 @@ use spanners_driver_api::{
 const BATCH_ROWS: usize = 500;
 
 pub struct MySqlDriver;
+
+/// Apply a URL parameter. Unknown parameters are an error: ignoring
+/// `ssl-mode=REQUIRED` would silently connect in plaintext.
+fn apply_param(o: MySqlConnectOptions, key: &str, value: &str) -> Result<MySqlConnectOptions> {
+    match key.to_ascii_lowercase().as_str() {
+        "ssl-mode" | "sslmode" => {
+            let mode = match value.to_ascii_lowercase().replace('_', "-").as_str() {
+                "disabled" | "disable" => MySqlSslMode::Disabled,
+                "preferred" | "prefer" => MySqlSslMode::Preferred,
+                "required" | "require" => MySqlSslMode::Required,
+                "verify-ca" | "verify_ca" => MySqlSslMode::VerifyCa,
+                "verify-identity" | "verify_identity" => MySqlSslMode::VerifyIdentity,
+                other => {
+                    return Err(DriverError::Connect(format!(
+                        "unknown ssl-mode '{other}'; use DISABLED, PREFERRED, REQUIRED, VERIFY_CA or VERIFY_IDENTITY"
+                    )))
+                }
+            };
+            Ok(o.ssl_mode(mode))
+        }
+        other => Err(DriverError::Connect(format!(
+            "unsupported connection parameter '{other}'"
+        ))),
+    }
+}
 
 impl MySqlDriver {
     pub fn new() -> Self {
@@ -75,6 +100,9 @@ impl Driver for MySqlDriver {
         }
         if let Some(pw) = &cfg.password {
             o = o.password(pw);
+        }
+        for (key, value) in &cfg.params {
+            o = apply_param(o, key, value)?;
         }
 
         let mut conn = MySqlConnection::connect_with(&o)
@@ -725,6 +753,48 @@ fn time_micros(t: NaiveTime) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config(params: Vec<(&str, &str)>) -> ConnConfig {
+        ConnConfig {
+            driver: "mysql".into(),
+            host: Some("127.0.0.1".into()),
+            port: Some(1),
+            database: None,
+            username: None,
+            password: None,
+            params: params
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_connection_parameter_is_refused_before_connecting() {
+        let err = match MySqlDriver::new()
+            .connect(&config(vec![("bogus", "1")]), SessionOpts::default())
+            .await
+        {
+            Ok(_) => panic!("expected the parameter to be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unsupported connection parameter"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_ssl_mode_is_named_in_the_error() {
+        let err = match MySqlDriver::new()
+            .connect(&config(vec![("ssl-mode", "maybe")]), SessionOpts::default())
+            .await
+        {
+            Ok(_) => panic!("expected the ssl-mode to be refused"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("unknown ssl-mode"), "{err}");
+    }
 
     #[test]
     fn epoch_conversion_matches_known_dates() {

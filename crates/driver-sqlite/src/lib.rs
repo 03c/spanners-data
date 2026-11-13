@@ -68,6 +68,14 @@ impl Driver for SqliteDriver {
             .clone()
             .ok_or_else(|| DriverError::Connect("SQLite requires a database path".into()))?;
 
+        // SQLite has no network TLS or connection parameters; refusing them is
+        // clearer than pretending they took effect.
+        if let Some((key, _)) = cfg.params.first() {
+            return Err(DriverError::Connect(format!(
+                "SQLite does not support the connection parameter '{key}'"
+            )));
+        }
+
         // The strongest read-only guarantee available: the file is opened
         // read-only, so no client bug can turn it into a write. `query_only` is
         // belt and braces for paths that ignore the flag (e.g. shared cache).

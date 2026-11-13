@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections, query (table/csv/jsonl), export, history, check; same config, history and policy as the app |
-| Tests | 132: 56 core, 26 app, 3 app end-to-end against real servers, 13 CLI (10 process-level), 17 driver integration, 17 driver unit/registry |
+| Tests | 175: 84 core, 29 app, 3 app end-to-end against real servers, 20 CLI (17 process-level), 17 driver integration, 22 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |

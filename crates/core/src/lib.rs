@@ -7,6 +7,7 @@ pub mod export;
 pub mod history;
 pub mod policy;
 pub mod split;
+pub mod url;
 
 pub use config::{AppConfig, ConfigError, ConfigStore, Connection};
 pub use executor::{execute_guarded, Gate};
@@ -16,3 +17,4 @@ pub use history::{
 };
 pub use policy::{Classification, Policy, Profile, StmtKind, Verdict, Violation};
 pub use split::{split, statement_at, Statement};
+pub use url::{parse as parse_url, ParsedUrl, UrlError};

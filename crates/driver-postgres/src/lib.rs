@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use futures_util::TryStreamExt;
-use sqlx::postgres::{PgConnectOptions, PgConnection, PgRow};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgRow, PgSslMode};
 use sqlx::{Column as _, Connection as _, Row as _, TypeInfo as _, ValueRef as _};
 use tokio::sync::mpsc;
 
@@ -27,6 +27,34 @@ use spanners_driver_api::{
 const BATCH_ROWS: usize = 500;
 
 pub struct PostgresDriver;
+
+/// Apply a URL parameter. Unknown parameters are an error: ignoring
+/// `sslmode=require` would silently connect in plaintext.
+fn apply_param(o: PgConnectOptions, key: &str, value: &str) -> Result<PgConnectOptions> {
+    match key.to_ascii_lowercase().as_str() {
+        "sslmode" => {
+            let mode = match value.to_ascii_lowercase().as_str() {
+                "disable" => PgSslMode::Disable,
+                "allow" => PgSslMode::Allow,
+                "prefer" => PgSslMode::Prefer,
+                "require" => PgSslMode::Require,
+                "verify-ca" => PgSslMode::VerifyCa,
+                "verify-full" => PgSslMode::VerifyFull,
+                other => {
+                    return Err(DriverError::Connect(format!(
+                        "unknown sslmode '{other}'; use disable, allow, prefer, require, verify-ca or verify-full"
+                    )))
+                }
+            };
+            Ok(o.ssl_mode(mode))
+        }
+        "application_name" => Ok(o.application_name(value)),
+        "options" => Ok(o.options([(key.to_string(), value.to_string())])),
+        other => Err(DriverError::Connect(format!(
+            "unsupported connection parameter '{other}'"
+        ))),
+    }
+}
 
 impl PostgresDriver {
     pub fn new() -> Self {
@@ -78,6 +106,9 @@ impl Driver for PostgresDriver {
         }
         if let Some(pw) = &cfg.password {
             o = o.password(pw);
+        }
+        for (key, value) in &cfg.params {
+            o = apply_param(o, key, value)?;
         }
 
         let mut conn = PgConnection::connect_with(&o)
@@ -731,6 +762,51 @@ fn group_schema(rows: &[PgRow]) -> SchemaSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config(params: Vec<(&str, &str)>) -> ConnConfig {
+        ConnConfig {
+            driver: "postgres".into(),
+            host: Some("127.0.0.1".into()),
+            port: Some(1),
+            database: None,
+            username: None,
+            password: None,
+            params: params
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_connection_parameter_is_refused_before_connecting() {
+        let err = match PostgresDriver::new()
+            .connect(&config(vec![("bogus", "1")]), SessionOpts::default())
+            .await
+        {
+            Ok(_) => panic!("expected the parameter to be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unsupported connection parameter"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_sslmode_is_named_in_the_error() {
+        let err = match PostgresDriver::new()
+            .connect(
+                &config(vec![("sslmode", "sometimes")]),
+                SessionOpts::default(),
+            )
+            .await
+        {
+            Ok(_) => panic!("expected the sslmode to be refused"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("unknown sslmode"), "{err}");
+    }
 
     #[test]
     fn epoch_conversion_matches_known_dates() {
