@@ -1571,3 +1571,80 @@ fn mysql_end_to_end_through_the_cli() {
         stderr(&bad)
     );
 }
+
+#[test]
+fn connections_show_prints_the_rules_that_will_apply() {
+    let f = Fixture::new();
+    let added = spanners(
+        f.home(),
+        &[
+            "connections",
+            "add",
+            "live",
+            "--url",
+            "postgres://reader@db.example.com:5432/app",
+            "--profile",
+            "production",
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    // Positional and -c are the same thing; the family's other commands use
+    // the flag, a person typing it expects the name.
+    let out = spanners(f.home(), &["connections", "show", "live"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("profile       production"), "{text}");
+    assert!(text.contains("read only     yes"), "{text}");
+    assert!(text.contains("row cap       200"), "{text}");
+    assert!(text.contains("timeout       15s"), "{text}");
+    assert!(text.contains("ddl           blocked"), "{text}");
+
+    let flag = spanners(f.home(), &["connections", "show", "-c", "live"]);
+    assert_eq!(stdout(&flag), text);
+}
+
+#[test]
+fn connections_show_reports_overrides_and_a_local_profile() {
+    let f = Fixture::new();
+    // There is no command to set overrides yet; they are config-file only, and
+    // this is what the UI will write.
+    std::fs::write(
+        f.home().join("config.toml"),
+        r#"schema_version = 1
+
+[[connections]]
+id = "abc"
+name = "tuned"
+driver = "sqlite"
+database = "/tmp/x.db"
+profile = "production"
+
+[connections.overrides]
+max_rows = 50
+timeout_ms = 2000
+read_only = true
+"#,
+    )
+    .unwrap();
+
+    let out = spanners(f.home(), &["connections", "show", "tuned"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    // The effective limits, not just the preset: an override that is invisible
+    // is one nobody can debug.
+    assert!(text.contains("row cap 50"), "{text}");
+    assert!(text.contains("timeout 2s"), "{text}");
+    assert!(text.contains("row cap       50"), "{text}");
+
+    // A local connection is unrestricted, and says so rather than omitting the
+    // rows: "no row cap" and "we did not print it" must not look alike.
+    let local = Fixture::new();
+    local.add("scratch", "local");
+    let out = spanners(local.home(), &["connections", "show", "scratch"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("row cap       none"), "{text}");
+    assert!(text.contains("timeout       none"), "{text}");
+    assert!(text.contains("ddl           allowed"), "{text}");
+}

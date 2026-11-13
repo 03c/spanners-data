@@ -130,7 +130,7 @@ enum Command {
         #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
-    /// Saved queries: list, show, add, run, remove.
+    /// Saved queries: list, show, add, run, edit, remove.
     Saved {
         #[command(subcommand)]
         action: SavedAction,
@@ -218,6 +218,14 @@ enum SavedAction {
 enum ConnectionAction {
     /// List saved connections.
     List,
+    /// Show one connection and the rules that will actually apply to it.
+    Show {
+        /// Connection id or name.
+        name: Option<String>,
+        /// Connection id or name, same as the positional.
+        #[arg(long, short)]
+        connection: Option<String>,
+    },
     /// Add a connection.
     Add {
         /// Name to show in the UI and use from the CLI.
@@ -636,6 +644,108 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
                         (None, None) => String::new(),
                     })
                 );
+            }
+            Ok(())
+        }
+        ConnectionAction::Show { name, connection } => {
+            let target = connection.or(name).ok_or_else(|| {
+                "name a connection: `spanners connections show <name>`".to_string()
+            })?;
+            let id = resolve(app, &target)?;
+            let c = app
+                .connection(&id)
+                .ok_or_else(|| format!("no connection {id}"))?;
+            let policy = c.policy();
+            let dsn = spanners_core::config::redact_dsn(&match (&c.host, &c.database) {
+                (Some(h), Some(d)) => match c.port {
+                    Some(p) => format!("{h}:{p}/{d}"),
+                    None => format!("{h}/{d}"),
+                },
+                (Some(h), None) => h.clone(),
+                (None, Some(d)) => d.clone(),
+                (None, None) => String::new(),
+            });
+
+            let mut rows: Vec<(&str, String)> = vec![
+                ("id", id.clone()),
+                ("name", c.name.clone()),
+                ("driver", c.driver.clone()),
+                ("dsn", dsn),
+            ];
+            if let Some(user) = &c.username {
+                rows.push(("username", user.clone()));
+            }
+            rows.push(("profile", c.profile.as_str().to_string()));
+            if !c.params.is_empty() {
+                let params: Vec<String> =
+                    c.params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                rows.push(("params", params.join(" ")));
+            }
+            // Overrides are what makes a connection differ from its preset, and
+            // the usual reason a limit looks wrong. Show them only when set.
+            let o = &c.overrides;
+            if o.max_rows.is_some() || o.timeout_ms.is_some() || o.read_only.is_some() {
+                let mut set = Vec::new();
+                if let Some(n) = o.max_rows {
+                    set.push(format!(
+                        "row cap {}",
+                        if n == 0 {
+                            "none".to_string()
+                        } else {
+                            n.to_string()
+                        }
+                    ));
+                }
+                if let Some(ms) = o.timeout_ms {
+                    set.push(format!("timeout {}", describe_ms(ms)));
+                }
+                if let Some(ro) = o.read_only {
+                    set.push(format!("read only {}", if ro { "yes" } else { "no" }));
+                }
+                rows.push(("overrides", set.join(", ")));
+            }
+            rows.push((
+                "read only",
+                if policy.read_only { "yes" } else { "no" }.to_string(),
+            ));
+            rows.push((
+                "row cap",
+                match policy.max_rows {
+                    Some(n) => n.to_string(),
+                    None => "none".to_string(),
+                },
+            ));
+            rows.push((
+                "timeout",
+                match policy.timeout {
+                    Some(t) => describe_ms(t.as_millis() as u64),
+                    None => "none".to_string(),
+                },
+            ));
+            rows.push((
+                "ddl",
+                if policy.allow_ddl {
+                    "allowed"
+                } else if policy.confirm_ddl {
+                    "asks first"
+                } else {
+                    "blocked"
+                }
+                .to_string(),
+            ));
+            rows.push((
+                "transactions",
+                if policy.require_transaction {
+                    "required for writes"
+                } else {
+                    "not required"
+                }
+                .to_string(),
+            ));
+
+            let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+            for (key, value) in rows {
+                println!("{key:<width$}  {value}");
             }
             Ok(())
         }
@@ -1463,6 +1573,19 @@ fn ask_password(name: &str) -> Result<Option<String>, String> {
     let password = rpassword::prompt_password(format!("password for {name}: "))
         .map_err(|e| format!("could not read the password: {e}"))?;
     Ok(Some(password))
+}
+
+/// Durations the way a human reads them: `15s`, `750 ms`, `2m`.
+fn describe_ms(ms: u64) -> String {
+    if ms == 0 {
+        "none".into()
+    } else if ms % 60_000 == 0 {
+        format!("{}m", ms / 60_000)
+    } else if ms % 1_000 == 0 {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{ms} ms")
+    }
 }
 
 fn read_sql(input: &str) -> Result<String, String> {
