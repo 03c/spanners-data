@@ -103,6 +103,31 @@ enum Command {
         #[arg(long, short)]
         sql: String,
     },
+    /// List tables, views and columns.
+    Schema {
+        #[arg(long, short)]
+        connection: String,
+        /// Only show tables whose name contains this text.
+        #[arg(long)]
+        table: Option<String>,
+        /// Print one line per column instead of one line per table.
+        #[arg(long)]
+        columns: bool,
+        #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+    /// Show the query plan without running the query.
+    Explain {
+        #[arg(long, short)]
+        connection: String,
+        #[arg(long, short)]
+        sql: String,
+        /// Print the plan as JSON when the server provides one.
+        #[arg(long)]
+        json: bool,
+        #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -231,6 +256,18 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::History { limit, search } => history(&app, limit, search.as_deref()),
         Command::Check { connection, sql } => check(&app, &connection, &sql).await,
+        Command::Schema {
+            connection,
+            table,
+            columns,
+            password,
+        } => schema(&mut app, &connection, table.as_deref(), columns, password).await,
+        Command::Explain {
+            connection,
+            sql,
+            json,
+            password,
+        } => explain(&mut app, &connection, &sql, json, password).await,
     }
 }
 
@@ -691,6 +728,85 @@ async fn check(app: &App, connection: &str, sql: &str) -> Result<(), String> {
             std::process::exit(2);
         }
     }
+}
+
+async fn schema(
+    app: &mut App,
+    connection: &str,
+    filter: Option<&str>,
+    one_line_per_column: bool,
+    password: Option<String>,
+) -> Result<(), String> {
+    let id = resolve(app, connection)?;
+    app.connect(&id, password)
+        .await
+        .map_err(|e| e.to_string())?;
+    let schema = app.schema(&id).await.map_err(|e| e.to_string())?;
+
+    let matches = |name: &str| match filter {
+        Some(f) => name.to_ascii_lowercase().contains(&f.to_ascii_lowercase()),
+        None => true,
+    };
+
+    for s in &schema.schemas {
+        for table in &s.tables {
+            if !matches(&table.name) {
+                continue;
+            }
+            let kind = match table.kind {
+                spanners_driver_api::TableKind::Table => "table",
+                spanners_driver_api::TableKind::View => "view",
+                spanners_driver_api::TableKind::Other => "other",
+            };
+            if one_line_per_column {
+                for column in &table.columns {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        s.name,
+                        table.name,
+                        kind,
+                        column.name,
+                        column.type_name,
+                        if column.nullable { "null" } else { "not null" }
+                    );
+                }
+            } else {
+                println!(
+                    "{}\t{}\t{}\t{} column(s)",
+                    s.name,
+                    table.name,
+                    kind,
+                    table.columns.len()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn explain(
+    app: &mut App,
+    connection: &str,
+    sql: &str,
+    as_json: bool,
+    password: Option<String>,
+) -> Result<(), String> {
+    let id = resolve(app, connection)?;
+    app.connect(&id, password)
+        .await
+        .map_err(|e| e.to_string())?;
+    let plan = app.explain(&id, sql).await.map_err(|e| e.to_string())?;
+    if as_json {
+        if let Some(json) = plan.json {
+            println!("{json}");
+            return Ok(());
+        }
+    }
+    print!("{}", plan.raw);
+    if !plan.raw.ends_with('\n') {
+        println!();
+    }
+    Ok(())
 }
 
 /// Select one statement from a buffer, 1-based, the way a user counts them.

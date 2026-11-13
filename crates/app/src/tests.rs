@@ -696,3 +696,45 @@ async fn row_count(app: &mut App, id: &str, sql: &str) -> u64 {
     }
     rows
 }
+
+#[tokio::test]
+async fn completion_uses_the_cached_schema_and_survives_ddl() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    let mut run = match app
+        .run(&id, "CREATE TABLE people (id INTEGER, name TEXT)", false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    // Nothing is cached until someone asks for the schema.
+    let sql = "SELECT  FROM people";
+    let before = app.complete(&id, sql, 7).unwrap();
+    assert!(before.iter().any(|c| c.text == "SELECT"));
+    assert!(!before.iter().any(|c| c.text == "name"));
+
+    app.schema(&id).await.unwrap();
+    let after = app.complete(&id, sql, 7).unwrap();
+    assert_eq!(after[0].text, "id");
+    assert!(after.iter().any(|c| c.text == "name"));
+
+    // Dropping the table makes the cached columns stale; the next DDL clears
+    // them, so the editor stops offering `name`.
+    let mut run = match app.run(&id, "DROP TABLE people", false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    let after_drop = app.complete(&id, sql, 7).unwrap();
+    assert!(!after_drop.iter().any(|c| c.text == "name"));
+}

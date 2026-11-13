@@ -18,7 +18,7 @@ use spanners_core::history::{
     HistoryEntry, Library, SavedQuery, SearchHit, Store, StoreError, HISTORY_MAX_DAYS,
     HISTORY_MAX_ROWS,
 };
-use spanners_core::{Gate, Policy};
+use spanners_core::{Completion, Gate, Policy};
 use spanners_driver_api::{
     Dialect, DriverError, ExecOpts, Plan, QueryEvent, QueryId, SchemaSnapshot, Session,
     SessionOpts, Value,
@@ -80,6 +80,10 @@ struct Live {
     session: Box<dyn Session>,
     policy: Policy,
     info: SessionInfo,
+    /// Cached schema, used for autocomplete. Fetched on demand rather than at
+    /// connect time, because a schema query costs a round trip the user did
+    /// not ask for, and a connection that is never queried needs no schema.
+    schema: Option<SchemaSnapshot>,
 }
 
 /// One running statement. Holding this is what keeps a query streamable.
@@ -322,6 +326,7 @@ impl App {
                 session,
                 policy,
                 info: info.clone(),
+                schema: None,
             },
         );
         Ok(info)
@@ -466,7 +471,16 @@ impl App {
         )
         .await?;
 
-        Ok(match gate {
+        // A DDL statement invalidates the cached schema. The cache is dropped
+        // even if the statement fails: a partially applied change is exactly
+        // when a stale column list is most misleading.
+        let changes_schema = matches!(gate, Gate::Run { .. })
+            && spanners_core::policy::classify(sql, live.info.dialect)
+                .statements
+                .iter()
+                .any(|kind| matches!(kind, spanners_core::StmtKind::Ddl));
+
+        let outcome = match gate {
             Gate::Blocked { reasons } => RunOutcome::Blocked { reasons },
             Gate::NeedsConfirmation { reasons } => RunOutcome::NeedsConfirmation { reasons },
             Gate::Run { query_id, events } => RunOutcome::Running(Run {
@@ -481,7 +495,14 @@ impl App {
                 },
                 finished: false,
             }),
-        })
+        };
+
+        if changes_schema {
+            if let Some(live) = self.live.get_mut(id) {
+                live.schema = None;
+            }
+        }
+        Ok(outcome)
     }
 
     pub async fn cancel(&mut self, id: &str, query_id: QueryId) -> Result<()> {
@@ -492,12 +513,48 @@ impl App {
         Ok(live.session.cancel(query_id).await?)
     }
 
+    /// The schema, from the cache when possible.
+    ///
+    /// The cache is dropped when a statement that changes it succeeds, so the
+    /// editor does not offer a column that was just removed. `refresh_schema`
+    /// is the explicit "reload" action.
     pub async fn schema(&mut self, id: &str) -> Result<SchemaSnapshot> {
         let live = self
             .live
             .get(id)
             .ok_or_else(|| AppError::NotConnected(id.into()))?;
-        Ok(live.session.schema().await?)
+        if let Some(schema) = &live.schema {
+            return Ok(schema.clone());
+        }
+        let schema = live.session.schema().await?;
+        if let Some(live) = self.live.get_mut(id) {
+            live.schema = Some(schema.clone());
+        }
+        Ok(schema)
+    }
+
+    /// Fetch the schema again, ignoring the cache.
+    pub async fn refresh_schema(&mut self, id: &str) -> Result<SchemaSnapshot> {
+        if let Some(live) = self.live.get_mut(id) {
+            live.schema = None;
+        }
+        self.schema(id).await
+    }
+
+    /// Autocomplete for the cursor at `offset`.
+    ///
+    /// Synchronous and cache-only: completion runs on every keystroke, so it
+    /// must never wait for a round trip. Call [`App::schema`] when the editor
+    /// opens so the first keystroke has something to work with.
+    pub fn complete(&self, id: &str, sql: &str, offset: usize) -> Result<Vec<Completion>> {
+        let dialect = self.dialect_of(id)?;
+        let empty = SchemaSnapshot::default();
+        let schema = self
+            .live
+            .get(id)
+            .and_then(|live| live.schema.as_ref())
+            .unwrap_or(&empty);
+        Ok(spanners_core::complete(schema, dialect, sql, offset))
     }
 
     pub async fn explain(&mut self, id: &str, sql: &str) -> Result<Plan> {

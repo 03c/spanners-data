@@ -1,5 +1,6 @@
 //! Core domain: what a connection *is*, and what it is allowed to do.
 
+pub mod completion;
 pub mod config;
 pub mod dialect;
 pub mod executor;
@@ -9,6 +10,7 @@ pub mod policy;
 pub mod split;
 pub mod url;
 
+pub use completion::{complete, Completion, Kind as CompletionKind};
 pub use config::{AppConfig, ConfigError, ConfigStore, Connection};
 pub use executor::{execute_guarded, Gate};
 pub use export::{export, Buffer, ExportError, ExportOpts, ExportSummary, Format, NullRepr};

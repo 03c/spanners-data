@@ -511,3 +511,77 @@ fn adding_without_a_driver_or_url_explains_the_choice() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("pass --driver"), "{}", stderr(&out));
 }
+
+#[test]
+fn schema_lists_tables_and_columns() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query(
+        "demo",
+        "CREATE TABLE people (id INTEGER, name TEXT NOT NULL)",
+    );
+    f.query("demo", "CREATE VIEW names AS SELECT name FROM people");
+
+    let out = spanners(f.home(), &["schema", "--connection", "demo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("people\ttable"), "{text}");
+    assert!(text.contains("names\tview"), "{text}");
+
+    let columns = spanners(
+        f.home(),
+        &[
+            "schema",
+            "--connection",
+            "demo",
+            "--columns",
+            "--table",
+            "people",
+        ],
+    );
+    assert!(columns.status.success(), "{}", stderr(&columns));
+    let text = stdout(&columns);
+    assert!(text.contains("id\tINTEGER"), "{text}");
+    assert!(text.contains("name\tTEXT\tnot null"), "{text}");
+}
+
+#[test]
+fn schema_can_filter_to_one_table() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE people (id INTEGER)");
+    f.query("demo", "CREATE TABLE places (id INTEGER)");
+
+    let out = spanners(
+        f.home(),
+        &["schema", "--connection", "demo", "--table", "peop"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("people"), "{text}");
+    assert!(!text.contains("places"), "{text}");
+}
+
+#[test]
+fn explain_shows_a_plan_without_running_the_query() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE people (id INTEGER)");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "explain",
+            "--connection",
+            "demo",
+            "--sql",
+            "SELECT * FROM people",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).to_ascii_uppercase().contains("SCAN"),
+        "{}",
+        stdout(&out)
+    );
+}

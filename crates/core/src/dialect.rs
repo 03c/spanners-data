@@ -249,6 +249,16 @@ pub fn is_keyword(dialect: Dialect, word: &str) -> bool {
     keywords(dialect).binary_search(&upper.as_str()).is_ok()
 }
 
+/// Whether `word` is one of the built-in functions offered by completion.
+pub fn is_function(_dialect: Dialect, word: &str) -> bool {
+    FUNCTIONS.binary_search(&word).is_ok()
+}
+
+/// Whether `word` is a type name offered by completion.
+pub fn is_type(_dialect: Dialect, word: &str) -> bool {
+    TYPES.binary_search(&word).is_ok()
+}
+
 fn dialect_words(dialect: Dialect) -> &'static [&'static str] {
     match dialect {
         Dialect::Postgres => POSTGRES,
