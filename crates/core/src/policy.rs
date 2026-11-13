@@ -15,7 +15,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{visit_statements, Statement};
+use sqlparser::ast::{visit_statements, Query, SetExpr, Statement};
 use sqlparser::dialect::{Dialect as SqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 
@@ -141,7 +141,14 @@ impl Policy {
 
         for kind in &c.statements {
             match kind {
-                StmtKind::Read | StmtKind::Other => {}
+                StmtKind::Read => {}
+                // Recognised by the parser but not by us: maintenance commands,
+                // extensions, `ATTACH`, `KILL`. Unknown is not the same as safe.
+                StmtKind::Other => {
+                    if self.profile != Profile::Local {
+                        confirming.push(Violation::UnknownStatement);
+                    }
+                }
                 StmtKind::Ddl => {
                     if !self.allow_ddl {
                         if self.confirm_ddl {
@@ -271,6 +278,10 @@ pub enum Violation {
     ReadOnlySession,
     Unparseable(String),
     WriteOutsideTransaction,
+    /// Parsed, but not a statement Spanners knows how to classify. The default
+    /// for "unknown" is confirmation, never "safe": a keyword we have never
+    /// seen must not be the reason a write reaches a guarded server.
+    UnknownStatement,
 }
 
 impl Violation {
@@ -284,6 +295,7 @@ impl Violation {
             Violation::WriteWithoutWhere => 3,
             Violation::Unparseable(_) => 4,
             Violation::WriteOutsideTransaction => 5,
+            Violation::UnknownStatement => 6,
         }
     }
 
@@ -296,8 +308,11 @@ impl Violation {
             Violation::DdlUnconfirmed => {
                 "schema changes on this connection need confirmation".into()
             }
+            // Covers UPDATE/DELETE without a predicate and writes that are
+            // bulk by construction (`SELECT ... INTO`, `REFRESH MATERIALIZED
+            // VIEW`), so the message names the hazard rather than the syntax.
             Violation::WriteWithoutWhere => {
-                "UPDATE/DELETE without a WHERE clause affects every row".into()
+                "this write is not limited to particular rows; it affects every row".into()
             }
             Violation::ReadOnlySession => "this connection is read-only".into(),
             Violation::WriteOutsideTransaction => {
@@ -306,6 +321,9 @@ impl Violation {
             }
             Violation::Unparseable(e) => {
                 format!("could not parse the statement ({e}); confirm before running")
+            }
+            Violation::UnknownStatement => {
+                "this statement is not one Spanners can classify; confirm before running".into()
             }
         }
     }
@@ -338,6 +356,14 @@ pub fn classify(sql: &str, dialect: Dialect) -> Classification {
 fn kind_of(stmt: &Statement) -> StmtKind {
     if let Some(k) = direct_write(stmt) {
         return k;
+    }
+
+    // Two writes wear a read-shaped keyword. `SELECT ... INTO newtable` creates
+    // a table and fills it, and `REFRESH MATERIALIZED VIEW` rewrites the view's
+    // rows. Both parse cleanly as ordinary queries, so a keyword check alone
+    // would let them run on staging outside a transaction.
+    if writes_by_structure(stmt) {
+        return StmtKind::Write { targeted: false };
     }
 
     // A CTE can hide DML: `WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x`.
@@ -374,6 +400,28 @@ fn kind_of(stmt: &Statement) -> StmtKind {
 
         _ => StmtKind::Other,
     }
+}
+
+/// Writes that the statement's structure reveals even though its first keyword
+/// looks like a read.
+fn writes_by_structure(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Query(q) => selects_into(q),
+        Statement::RefreshMaterializedView(_) => true,
+        _ => false,
+    }
+}
+
+fn selects_into(query: &Query) -> bool {
+    fn in_body(body: &SetExpr) -> bool {
+        match body {
+            SetExpr::Select(s) => s.into.is_some(),
+            SetExpr::Query(inner) => selects_into(inner),
+            SetExpr::SetOperation { left, right, .. } => in_body(left) || in_body(right),
+            _ => false,
+        }
+    }
+    in_body(&query.body)
 }
 
 fn direct_write(stmt: &Statement) -> Option<StmtKind> {
@@ -428,6 +476,58 @@ mod tests {
             judge("INSERT INTO users VALUES (1)", Profile::Production),
             Verdict::Block { .. }
         ));
+    }
+
+    #[test]
+    fn writes_that_look_like_reads_are_still_writes() {
+        // `SELECT ... INTO` creates a table and fills it; `REFRESH
+        // MATERIALIZED VIEW` rewrites the view's rows. Both start with a
+        // read-shaped keyword and parse cleanly, so only the AST catches them.
+        for sql in [
+            "SELECT * INTO newtable FROM t",
+            "SELECT * INTO newtable FROM t WHERE id = 1",
+            "WITH x AS (SELECT 1) SELECT * INTO t FROM x",
+            "REFRESH MATERIALIZED VIEW v",
+        ] {
+            assert!(
+                matches!(
+                    judge(sql, Profile::Production),
+                    Verdict::Block { ref reasons }
+                        if reasons.contains(&Violation::ReadOnlySession)
+                ),
+                "{sql} should be blocked on production"
+            );
+            // On staging it is a bulk write: confirmation plus an explicit
+            // transaction, never a silent run.
+            let verdict = Policy::preset(Profile::Staging).judge_in(sql, Dialect::Postgres, false);
+            assert!(matches!(verdict, Verdict::Block { .. }), "{sql}");
+        }
+
+        // A plain read stays a read.
+        assert!(judge("SELECT * FROM t", Profile::Production).is_allowed());
+    }
+
+    #[test]
+    fn a_statement_we_cannot_classify_asks_instead_of_assuming_a_read() {
+        // `VACUUM`, `ATTACH`, `KILL` and friends parse fine but are not in any
+        // of our lists. Falling through to "read" would be a fail-open default.
+        for sql in ["VACUUM", "ANALYZE t", "ATTACH DATABASE 'x.db' AS x"] {
+            assert!(
+                judge(sql, Profile::Local).is_allowed(),
+                "local should not be bothered: {sql}"
+            );
+            for profile in [Profile::Staging, Profile::Production] {
+                match judge(sql, profile) {
+                    Verdict::Confirm { reasons } => {
+                        assert!(
+                            reasons.contains(&Violation::UnknownStatement),
+                            "{sql}: {reasons:?}"
+                        );
+                    }
+                    other => panic!("{sql} on {profile:?}: expected Confirm, got {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]

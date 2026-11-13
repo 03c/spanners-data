@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections (add, edit, show, set-profile, test, import from DBeaver), query (table/csv/jsonl), export, history, check, schema, explain, saved; same config, history and policy as the app |
-| Tests | 263: 118 core, 41 app, 4 app end-to-end against real servers, 58 CLI (55 process-level, 2 against real servers), 17 driver integration, 25 driver unit/registry |
+| Tests | 265: 120 core, 41 app, 4 app end-to-end against real servers, 58 CLI (55 process-level, 2 against real servers), 17 driver integration, 25 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -270,11 +270,16 @@ Three layers. Layer 1 is the actual guarantee; 2 and 3 are UX.
 
 **Layer 2 — statement inspection** (`sqlparser`) blocks multi-statement input
 on prod and DDL on prod, asks before DDL on staging (a migration there is
-normal, just not silent), and warns on `UPDATE`/`DELETE` without `WHERE`. Unparseable
-input is treated as unknown → confirmation required, never as safe. On staging
-a write is *blocked* unless an explicit transaction is open (`BEGIN`), so a
-forgotten `COMMIT` is a visible decision rather than an implicit one; the
-check is part of the verdict (`Policy::judge_in`), not a UI reminder.
+normal, just not silent), and warns on writes that are not limited to
+particular rows (`UPDATE`/`DELETE` without `WHERE`, and bulk-by-construction
+writes such as `SELECT ... INTO` and `REFRESH MATERIALIZED VIEW`). Unparseable
+input is treated as unknown → confirmation required, never as safe; so is a
+statement that parses but that we cannot classify (`VACUUM`, `ATTACH`, `KILL`,
+extensions). "We have not seen this keyword" must never be the reason a write
+reaches a guarded server. On staging a write is *blocked* unless an explicit
+transaction is open (`BEGIN`), so a forgotten `COMMIT` is a visible decision
+rather than an implicit one; the check is part of the verdict
+(`Policy::judge_in`), not a UI reminder.
 
 **Layer 3 — row cap + transaction gate**, as described above. A caller may
 tighten the cap or the timeout for one statement (`--timeout`, `run_with_exec`)

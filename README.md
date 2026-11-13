@@ -138,7 +138,8 @@ Linux and Windows; the pass bar and decision rule are in PLAN.md §3.2.
 Production connections are opened read-only *at the server* (`PRAGMA
 query_only`, `SET default_transaction_read_only`, `SET SESSION TRANSACTION READ
 ONLY`), so a bug in our SQL classifier cannot write. On top of that, statements
-are classified before execution (multi-statement, DDL, `UPDATE`/`DELETE`
-without `WHERE`, writes hidden in CTEs) and unparseable input is treated as
-unsafe rather than safe. Row caps are a fetch stop — the user's SQL is never
+are classified before execution (multi-statement, DDL, writes hidden in CTEs,
+`SELECT ... INTO`, writes that are not limited to particular rows) and
+anything we cannot classify — unparseable, or a keyword we do not know — is
+treated as unsafe rather than safe. Row caps are a fetch stop — the user's SQL is never
 rewritten.
