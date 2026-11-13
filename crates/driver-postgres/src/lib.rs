@@ -460,6 +460,12 @@ fn classify(err: &sqlx::Error, cancelled: bool) -> Option<String> {
             Some("57014") => Some(codes::TIMEOUT.to_string()),
             // read_only_sql_transaction / cannot execute in a read-only tx.
             Some("25006") => Some(codes::READ_ONLY.to_string()),
+            // SQLSTATE class 08 is "connection exception" and 57P01 is an
+            // administrator shutdown (`pg_terminate_backend`, a server restart).
+            // The session is gone; retrying on it will only fail again.
+            Some(code) if code.starts_with("08") || code == "57P01" => {
+                Some(codes::DISCONNECTED.to_string())
+            }
             _ => None,
         },
         sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => {

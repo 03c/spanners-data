@@ -9,6 +9,7 @@ pub mod secrets;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -104,6 +105,9 @@ struct Live {
     /// connect time, because a schema query costs a round trip the user did
     /// not ask for, and a connection that is never queried needs no schema.
     schema: Option<SchemaSnapshot>,
+    /// Set when a statement reports that the connection is gone, so the next
+    /// statement offers a reconnect instead of failing on a dead socket.
+    dead: Arc<AtomicBool>,
 }
 
 /// One running statement. Holding this is what keeps a query streamable.
@@ -116,6 +120,9 @@ pub struct Run {
     events: mpsc::Receiver<QueryEvent>,
     recorder: Recorder,
     finished: bool,
+    /// Shared with the session, so a driver that reports `DISCONNECTED` marks
+    /// the session unusable from inside the event stream.
+    dead: Arc<AtomicBool>,
 }
 
 struct Recorder {
@@ -136,7 +143,12 @@ impl Run {
                 row_count,
                 ..
             }) => self.finish(Some(*row_count), None, *elapsed_ms),
-            Some(QueryEvent::Failed { message, .. }) => self.finish(None, Some(message.clone()), 0),
+            Some(QueryEvent::Failed { message, code, .. }) => {
+                if code.as_deref() == Some(spanners_driver_api::codes::DISCONNECTED) {
+                    self.dead.store(true, Ordering::Relaxed);
+                }
+                self.finish(None, Some(message.clone()), 0)
+            }
             None => {
                 // The producer vanished without a terminal event. Record it:
                 // silence in the history would look like the query never ran.
@@ -330,8 +342,13 @@ impl App {
     /// store only if one is available.
     pub async fn connect(&mut self, id: &str, password: Option<String>) -> Result<SessionInfo> {
         if let Some(live) = self.live.get(id) {
-            return Ok(live.info.clone());
+            if !live.dead.load(Ordering::Relaxed) {
+                return Ok(live.info.clone());
+            }
         }
+        // A dead session is dropped without a close handshake: the connection
+        // is already gone, and waiting on it would only delay the reconnect.
+        self.live.remove(id);
         self.open_session(id, password, None).await
     }
 
@@ -400,6 +417,7 @@ impl App {
                 info: info.clone(),
                 unlock_until: None,
                 schema: None,
+                dead: Arc::new(AtomicBool::new(false)),
             },
         );
         Ok(info)
@@ -563,6 +581,9 @@ impl App {
 
     pub async fn disconnect(&mut self, id: &str) -> Result<()> {
         match self.live.remove(id) {
+            // Closing a session that already reported the connection gone just
+            // waits for a timeout; there is nothing left to say to the server.
+            Some(live) if live.dead.load(Ordering::Relaxed) => Ok(()),
             Some(live) => {
                 live.session.close().await?;
                 Ok(())
@@ -572,11 +593,16 @@ impl App {
     }
 
     pub fn is_connected(&self, id: &str) -> bool {
-        self.live.contains_key(id)
+        self.live
+            .get(id)
+            .is_some_and(|l| !l.dead.load(Ordering::Relaxed))
     }
 
     pub fn session_info(&self, id: &str) -> Option<&SessionInfo> {
-        self.live.get(id).map(|l| &l.info)
+        self.live
+            .get(id)
+            .filter(|l| !l.dead.load(Ordering::Relaxed))
+            .map(|l| &l.info)
     }
 
     /// Split a buffer into statements for the editor. Uses the connection's
@@ -724,6 +750,7 @@ impl App {
                     started: Instant::now(),
                 },
                 finished: false,
+                dead: Arc::clone(&live.dead),
             }),
         };
 

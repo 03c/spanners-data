@@ -73,6 +73,26 @@ async fn drain(run: &mut spanners_app::Run) -> (usize, Option<String>) {
     (rows, error)
 }
 
+/// First cell of the first row, as text. Enough for a pid or a boolean.
+async fn scalar(app: &mut App, id: &str, sql: &str) -> Option<String> {
+    let mut run = match app.run(id, sql, false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    let mut first = None;
+    while let Some(event) = run.recv().await {
+        if let QueryEvent::Batch { rows, .. } = event {
+            if first.is_none() {
+                first = rows
+                    .first()
+                    .and_then(|r| r.get(0))
+                    .and_then(|v| v.as_text());
+            }
+        }
+    }
+    first
+}
+
 async fn exercise(url: &str, profile: Profile) {
     let (_dir, mut app) = app().await;
     let (conn, password) = connection("live", url, profile);
@@ -213,4 +233,57 @@ async fn a_remembered_password_is_used_by_test_and_connect() {
 
     app.connect(&id, None).await.expect("connect");
     assert!(app.is_connected(&id));
+}
+
+/// A server restart, a `pg_terminate_backend`, a laptop waking up: the session
+/// is gone. The app must notice rather than keep offering a dead socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_killed_backend_is_detected_and_the_session_can_reconnect() {
+    let Ok(url) = std::env::var("SPANNERS_TEST_POSTGRES") else {
+        eprintln!("skipped: SPANNERS_TEST_POSTGRES not set");
+        return;
+    };
+    let (_dir, mut app) = app().await;
+    let (victim, password) = connection("victim", &url, Profile::Local);
+    let (killer, _) = connection("killer", &url, Profile::Local);
+    let (victim_id, killer_id) = (victim.id.clone(), killer.id.clone());
+    app.upsert_connection(victim).unwrap();
+    app.upsert_connection(killer).unwrap();
+    app.connect(&victim_id, password.clone()).await.unwrap();
+    app.connect(&killer_id, password.clone()).await.unwrap();
+
+    let pid = scalar(&mut app, &victim_id, "SELECT pg_backend_pid()")
+        .await
+        .expect("a backend pid");
+    let killed = scalar(
+        &mut app,
+        &killer_id,
+        &format!("SELECT pg_terminate_backend({pid})"),
+    )
+    .await;
+    assert_eq!(killed.as_deref(), Some("true"));
+
+    // The statement after the kill fails, and the failure arrives as an event
+    // so the session can mark itself unusable.
+    match app.run(&victim_id, "SELECT 1", false).await {
+        Ok(RunOutcome::Running(mut run)) => while run.recv().await.is_some() {},
+        Ok(other) => panic!("expected to run, got {other:?}"),
+        Err(e) => panic!("expected the failure as an event, got {e}"),
+    }
+    assert!(
+        !app.is_connected(&victim_id),
+        "a session whose connection is gone must not be offered"
+    );
+    assert!(app.session_info(&victim_id).is_none());
+
+    // Connecting again replaces the dead session without an explicit
+    // disconnect, which is what a Reconnect button will call.
+    app.connect(&victim_id, password)
+        .await
+        .expect("reconnect over a dead session");
+    assert!(app.is_connected(&victim_id));
+    assert_eq!(
+        scalar(&mut app, &victim_id, "SELECT 1").await.as_deref(),
+        Some("1")
+    );
 }

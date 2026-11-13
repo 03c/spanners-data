@@ -485,6 +485,9 @@ fn classify(err: &sqlx::Error, cancelled: bool) -> Option<String> {
                     // ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION, ER_READ_ONLY_MODE,
                     // ER_OPTION_PREVENTS_STATEMENT.
                     1792 | 1836 | 1290 => return Some(codes::READ_ONLY.to_string()),
+                    // ER_SERVER_SHUTDOWN: the server is going away, so is the
+                    // session.
+                    1053 => return Some(codes::DISCONNECTED.to_string()),
                     _ => {}
                 }
             }
