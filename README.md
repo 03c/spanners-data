@@ -27,6 +27,39 @@ the shell decision, which is the only remaining blocker.
 | Tauri UI | spike only, throwaway |
 | CI | Linux + Windows: fmt, clippy, tests, both spikes; Linux job with real Postgres + MySQL |
 
+## Try it
+
+There is no window yet, so the CLI is how to see the engine work. It opens the
+same config, history and policy as the app will.
+
+```bash
+cargo build --release -p spanners-cli
+S=target/release/spanners
+
+# A connection from a URL. The password goes to the OS keychain when there is
+# one, and is never written to config.toml.
+$S connections add local --url "postgres://me@localhost/app?sslmode=require"
+
+# Query, script, export, browse, explain.
+$S query -c local --sql "SELECT * FROM users LIMIT 5"
+$S query -c local --sql "CREATE TABLE t (id int); INSERT INTO t VALUES (1); SELECT * FROM t"
+$S export -c local --sql "SELECT * FROM events" --out events.csv
+$S schema -c local --columns --table users
+$S explain -c local --sql "SELECT * FROM users WHERE id = 1"
+
+# Staging: writes only inside an explicit transaction, DDL asks first.
+$S query -c stage --sql "UPDATE users SET x = 1 WHERE id = 2" --transaction
+
+# Production: read-only at the server. Unlock one run by typing the name.
+$S query -c live --sql "UPDATE users SET x = 1 WHERE id = 2" --unlock-writes live
+
+$S history            # what you ran
+$S check -c live --sql "DROP TABLE users"   # classify without running; exit 2 = blocked
+```
+
+`--home <dir>` keeps config and history in one place, which is handy for demos
+and for tests that must not touch your real state.
+
 ## Layout
 
 ```
