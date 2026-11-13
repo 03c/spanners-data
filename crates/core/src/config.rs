@@ -129,6 +129,41 @@ impl Connection {
         self.driver == "sqlite"
     }
 
+    /// Check the fields a connection needs before it can be saved.
+    ///
+    /// The name is not decoration: unlocking writes on a production connection
+    /// asks the user to type it, so an empty or padded name would weaken a
+    /// safety prompt. Duplicate names are rejected by the app, which can see
+    /// the other connections.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("a connection needs a name".into());
+        }
+        if self.name.trim() != self.name {
+            return Err("the name cannot start or end with whitespace".into());
+        }
+        if self.name.chars().any(|c| c.is_control()) {
+            return Err("the name cannot contain control characters".into());
+        }
+        if self.driver.trim().is_empty() {
+            return Err("a connection needs a driver".into());
+        }
+        if self.port == Some(0) {
+            return Err("port 0 is not a port".into());
+        }
+        if self.is_embedded()
+            && self
+                .database
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err("SQLite needs a database path".into());
+        }
+        Ok(())
+    }
+
     /// Runtime connection parameters. The password is supplied by the caller
     /// from the keychain, or by a prompt when no keychain is available; it is
     /// never read from the persisted [`Connection`].
@@ -309,6 +344,36 @@ mod tests {
 
         let toml = toml::to_string(&c).unwrap();
         assert!(!toml.contains("hunter2"));
+    }
+
+    #[test]
+    fn a_connection_needs_a_name_a_driver_and_a_sqlite_path() {
+        let mut c = Connection::new("", "sqlite", Profile::Local);
+        c.database = Some("/tmp/x.db".into());
+        assert_eq!(c.validate().unwrap_err(), "a connection needs a name");
+
+        // A padded name would make the "type the name to unlock" prompt easier
+        // to satisfy by accident.
+        c.name = " live ".into();
+        assert!(c.validate().unwrap_err().contains("whitespace"));
+
+        c.name = "live".into();
+        c.driver = "  ".into();
+        assert_eq!(c.validate().unwrap_err(), "a connection needs a driver");
+
+        c.driver = "sqlite".into();
+        c.database = None;
+        assert_eq!(c.validate().unwrap_err(), "SQLite needs a database path");
+
+        c.database = Some("/tmp/x.db".into());
+        assert!(c.validate().is_ok());
+
+        // A network driver does not need a path.
+        let mut pg = Connection::new("live", "postgres", Profile::Production);
+        pg.port = Some(0);
+        assert_eq!(pg.validate().unwrap_err(), "port 0 is not a port");
+        pg.port = None;
+        assert!(pg.validate().is_ok());
     }
 
     #[test]

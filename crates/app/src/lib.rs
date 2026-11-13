@@ -65,6 +65,12 @@ pub enum AppError {
     /// `unlock_writes` on a connection that is not read-only.
     #[error("this connection already allows writes")]
     WritesAlreadyAllowed,
+    /// The connection is missing a field it needs, or has one that would
+    /// weaken a prompt.
+    #[error("{0}")]
+    InvalidConnection(String),
+    #[error("there is already a connection called {name}")]
+    DuplicateName { name: String },
     #[error("{0}")]
     Io(String),
 }
@@ -232,6 +238,20 @@ impl App {
     /// Insert or replace a connection. Saving is immediate and atomic: a crash
     /// must not lose a connection the user just typed in.
     pub fn upsert_connection(&mut self, connection: Connection) -> Result<()> {
+        connection.validate().map_err(AppError::InvalidConnection)?;
+        // Names are how the CLI and the command palette address a connection,
+        // so two connections with one name would be ambiguous. Compared
+        // case-insensitively for the same reason.
+        if let Some(other) = self
+            .config
+            .connections
+            .iter()
+            .find(|c| c.id != connection.id && c.name.eq_ignore_ascii_case(&connection.name))
+        {
+            return Err(AppError::DuplicateName {
+                name: other.name.clone(),
+            });
+        }
         match self
             .config
             .connections

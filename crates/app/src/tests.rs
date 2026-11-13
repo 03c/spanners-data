@@ -908,3 +908,33 @@ async fn judging_reflects_an_unlock_without_running_anything() {
         spanners_core::Verdict::Allow
     );
 }
+
+#[tokio::test]
+async fn a_connection_without_a_name_or_with_a_duplicate_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let mut app = app_with(&dir).await;
+
+    let mut nameless = local_sqlite(&dir);
+    nameless.name = "   ".into();
+    assert!(matches!(
+        app.upsert_connection(nameless).unwrap_err(),
+        AppError::InvalidConnection(_)
+    ));
+
+    let mut first = local_sqlite(&dir);
+    first.name = "live".into();
+    app.upsert_connection(first.clone()).unwrap();
+
+    // A second connection with the same name would make `--connection live`
+    // ambiguous, and the unlock prompt meaningless.
+    let mut second = local_sqlite(&dir);
+    second.name = "LIVE".into();
+    assert!(matches!(
+        app.upsert_connection(second).unwrap_err(),
+        AppError::DuplicateName { .. }
+    ));
+
+    // Editing the same connection keeps its own name.
+    first.profile = Profile::Production;
+    app.upsert_connection(first).unwrap();
+}

@@ -786,3 +786,52 @@ fn csv_output_refuses_a_multi_statement_buffer() {
         stderr(&out)
     );
 }
+
+#[test]
+fn a_nameless_or_duplicate_connection_is_refused() {
+    let f = Fixture::new();
+    let db = f.db();
+
+    let nameless = spanners(
+        f.home(),
+        &[
+            "connections",
+            "add",
+            "",
+            "--driver",
+            "sqlite",
+            "--database",
+            &db,
+        ],
+    );
+    assert!(!nameless.status.success());
+    assert!(
+        stderr(&nameless).contains("needs a name"),
+        "{}",
+        stderr(&nameless)
+    );
+
+    f.add("demo", "local");
+    let duplicate = spanners(
+        f.home(),
+        &[
+            "connections",
+            "add",
+            "Demo",
+            "--driver",
+            "sqlite",
+            "--database",
+            &db,
+        ],
+    );
+    assert!(!duplicate.status.success());
+    assert!(
+        stderr(&duplicate).contains("already a connection"),
+        "{}",
+        stderr(&duplicate)
+    );
+
+    // Exactly one connection survived.
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert_eq!(stdout(&list).lines().count(), 1, "{}", stdout(&list));
+}
