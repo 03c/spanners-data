@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections, query (table/csv/jsonl), export, history, check, schema, explain; same config, history and policy as the app |
-| Tests | 215: 101 core, 38 app, 3 app end-to-end against real servers, 31 CLI (29 process-level), 17 driver integration, 24 driver unit/registry |
+| Tests | 218: 102 core, 38 app, 4 app end-to-end against real servers, 32 CLI (30 process-level), 17 driver integration, 24 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -269,7 +269,8 @@ Three layers. Layer 1 is the actual guarantee; 2 and 3 are UX.
 | production | `default_transaction_read_only=on`, `statement_timeout=15s` | `SET SESSION TRANSACTION READ ONLY`, `max_execution_time=15000` | `PRAGMA query_only=ON` |
 
 **Layer 2 — statement inspection** (`sqlparser`) blocks multi-statement input
-and DDL on prod, and warns on `UPDATE`/`DELETE` without `WHERE`. Unparseable
+on prod and DDL on prod, asks before DDL on staging (a migration there is
+normal, just not silent), and warns on `UPDATE`/`DELETE` without `WHERE`. Unparseable
 input is treated as unknown → confirmation required, never as safe. On staging
 a write is *blocked* unless an explicit transaction is open (`BEGIN`), so a
 forgotten `COMMIT` is a visible decision rather than an implicit one; the

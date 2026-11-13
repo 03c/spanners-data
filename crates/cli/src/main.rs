@@ -841,12 +841,14 @@ fn history(app: &App, limit: u32, search: Option<&str>) -> Result<(), String> {
             Some(e) => format!("error: {e}"),
             None => format!("{} row(s)", entry.row_count.unwrap_or(0)),
         };
+        let name = app
+            .connection(&entry.connection_id)
+            .map(|c| c.name.as_str())
+            .unwrap_or(entry.connection_id.as_str());
         println!(
-            "{}\t{}\t{}\t{}",
-            entry.connection_id,
-            status,
-            oneline(&entry.sql),
-            entry.duration_ms
+            "{name}\t{status}\t{}ms\t{}",
+            entry.duration_ms,
+            oneline(&entry.sql)
         );
     }
     Ok(())

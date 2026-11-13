@@ -498,6 +498,13 @@ impl App {
         let policy = connection.policy();
         let dialect = connection.dialect().unwrap_or_else(|| driver.dialect());
 
+        // A test uses the remembered password like a connect does; otherwise
+        // "Test" fails on a connection that works, which is worse than useless.
+        let password = match password {
+            Some(p) => Some(p),
+            None => self.secrets.get(&connection.id).unwrap_or(None),
+        };
+
         let session = driver
             .connect(
                 &connection.to_conn_config(password),

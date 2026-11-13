@@ -51,6 +51,10 @@ pub struct Policy {
     pub timeout: Option<Duration>,
     pub read_only: bool,
     pub allow_ddl: bool,
+    /// DDL is allowed only with explicit consent (staging). Distinct from
+    /// `allow_ddl`, which is "allowed outright" (local) or "refused"
+    /// (production): a migration on staging is normal, just not silent.
+    pub confirm_ddl: bool,
     pub allow_multi_statement: bool,
     pub require_transaction: bool,
 }
@@ -64,6 +68,7 @@ impl Policy {
                 timeout: None,
                 read_only: false,
                 allow_ddl: true,
+                confirm_ddl: false,
                 allow_multi_statement: true,
                 require_transaction: false,
             },
@@ -73,6 +78,7 @@ impl Policy {
                 timeout: Some(Duration::from_secs(60)),
                 read_only: false,
                 allow_ddl: false,
+                confirm_ddl: true,
                 allow_multi_statement: true,
                 require_transaction: true,
             },
@@ -82,6 +88,7 @@ impl Policy {
                 timeout: Some(Duration::from_secs(15)),
                 read_only: true,
                 allow_ddl: false,
+                confirm_ddl: false,
                 allow_multi_statement: false,
                 require_transaction: false,
             },
@@ -137,7 +144,11 @@ impl Policy {
                 StmtKind::Read | StmtKind::Other => {}
                 StmtKind::Ddl => {
                     if !self.allow_ddl {
-                        blocking.push(Violation::Ddl);
+                        if self.confirm_ddl {
+                            confirming.push(Violation::DdlUnconfirmed);
+                        } else {
+                            blocking.push(Violation::Ddl);
+                        }
                     }
                 }
                 StmtKind::Write { targeted } => {
@@ -254,6 +265,8 @@ impl Verdict {
 pub enum Violation {
     MultipleStatements(usize),
     Ddl,
+    /// DDL on a profile that allows it only with explicit consent.
+    DdlUnconfirmed,
     WriteWithoutWhere,
     ReadOnlySession,
     Unparseable(String),
@@ -267,6 +280,7 @@ impl Violation {
             Violation::MultipleStatements(_) => 0,
             Violation::ReadOnlySession => 1,
             Violation::Ddl => 2,
+            Violation::DdlUnconfirmed => 2,
             Violation::WriteWithoutWhere => 3,
             Violation::Unparseable(_) => 4,
             Violation::WriteOutsideTransaction => 5,
@@ -279,6 +293,9 @@ impl Violation {
                 format!("{n} statements in one buffer; this connection allows one")
             }
             Violation::Ddl => "schema changes are blocked on this connection".into(),
+            Violation::DdlUnconfirmed => {
+                "schema changes on this connection need confirmation".into()
+            }
             Violation::WriteWithoutWhere => {
                 "UPDATE/DELETE without a WHERE clause affects every row".into()
             }
@@ -414,6 +431,23 @@ mod tests {
     }
 
     #[test]
+    fn staging_confirms_ddl_instead_of_blocking_it() {
+        // A migration on staging is normal; it should ask, not refuse.
+        match judge("CREATE TABLE t (id int)", Profile::Staging) {
+            Verdict::Confirm { reasons } => {
+                assert_eq!(reasons, [Violation::DdlUnconfirmed])
+            }
+            other => panic!("expected Confirm, got {other:?}"),
+        }
+        // Local runs it, production refuses it outright.
+        assert!(judge("CREATE TABLE t (id int)", Profile::Local).is_allowed());
+        assert!(matches!(
+            judge("CREATE TABLE t (id int)", Profile::Production),
+            Verdict::Block { .. }
+        ));
+    }
+
+    #[test]
     fn production_blocks_statement_chaining() {
         let v = judge("SELECT 1; DROP TABLE users", Profile::Production);
         match v {
@@ -461,10 +495,10 @@ mod tests {
     }
 
     #[test]
-    fn staging_blocks_ddl() {
+    fn staging_confirms_ddl() {
         assert!(matches!(
             judge("ALTER TABLE users ADD COLUMN x int", Profile::Staging),
-            Verdict::Block { .. }
+            Verdict::Confirm { .. }
         ));
     }
 

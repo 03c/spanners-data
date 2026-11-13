@@ -244,13 +244,33 @@ fn staging_asks_for_confirmation_unless_told_yes() {
 fn check_classifies_without_running() {
     let f = Fixture::new();
     f.add("stage", "staging");
+    f.add("live", "production");
 
-    let blocked = spanners(
+    // Staging asks before a schema change rather than refusing it.
+    let asks = spanners(
         f.home(),
         &[
             "check",
             "--connection",
             "stage",
+            "--sql",
+            "CREATE TABLE t (id int)",
+        ],
+    );
+    assert!(asks.status.success(), "{}", stderr(&asks));
+    assert!(
+        stderr(&asks).contains("needs confirmation"),
+        "{}",
+        stderr(&asks)
+    );
+
+    // Production refuses it, and `check` exits 2 so a script can branch.
+    let blocked = spanners(
+        f.home(),
+        &[
+            "check",
+            "--connection",
+            "live",
             "--sql",
             "CREATE TABLE t (id int)",
         ],
@@ -834,4 +854,31 @@ fn a_nameless_or_duplicate_connection_is_refused() {
     // Exactly one connection survived.
     let list = spanners(f.home(), &["connections", "list"]);
     assert_eq!(stdout(&list).lines().count(), 1, "{}", stdout(&list));
+}
+
+#[test]
+fn staging_asks_before_a_schema_change() {
+    let f = Fixture::new();
+    f.add("stage", "staging");
+
+    let refused = f.query("stage", "CREATE TABLE t (x INTEGER)");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("need confirmation"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let allowed = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "stage",
+            "--sql",
+            "CREATE TABLE t (x INTEGER)",
+            "--yes",
+        ],
+    );
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
 }

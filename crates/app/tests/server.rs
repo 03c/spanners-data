@@ -192,3 +192,25 @@ async fn postgres_export_streams_a_real_table() {
     assert_eq!(summary.rows, 2);
     assert_eq!(text, "id,name\n1,ada\n2,\\N\n");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remembered_password_is_used_by_test_and_connect() {
+    let Ok(url) = std::env::var("SPANNERS_TEST_POSTGRES") else {
+        eprintln!("skipped: SPANNERS_TEST_POSTGRES not set");
+        return;
+    };
+    let (_dir, mut app) = app().await;
+    let (conn, password) = connection("remembered", &url, Profile::Local);
+    let id = conn.id.clone();
+    app.upsert_connection(conn.clone()).unwrap();
+    app.remember_password(&id, password.as_deref().unwrap())
+        .unwrap();
+
+    // "Test" must use the stored secret, or it reports a failure for a
+    // connection that works.
+    let info = app.test_connection(&conn, None).await.expect("test");
+    assert!(!info.server_version.is_empty());
+
+    app.connect(&id, None).await.expect("connect");
+    assert!(app.is_connected(&id));
+}
