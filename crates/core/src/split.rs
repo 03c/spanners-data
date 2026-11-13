@@ -489,3 +489,100 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod invariants {
+    use super::*;
+
+    /// A deterministic generator, so a failing case is reproducible from its
+    /// seed. Dependency-free because the interesting alphabet is twenty
+    /// characters wide and a shrunk counterexample here is just the input.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+            xs[(self.next() % xs.len() as u64) as usize]
+        }
+    }
+
+    /// Every character that changes the lexer's state, plus one multibyte
+    /// character so a byte offset can land mid-character.
+    const ALPHABET: &[char] = &[
+        'a', '1', '_', ' ', '\n', '\t', ';', '\'', '"', '`', '[', ']', '-', '/', '*', '\\', '$',
+        'E', 'e', 'D', 'O', 'R', 'é',
+    ];
+
+    const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite];
+
+    fn cases(count: u32) -> impl Iterator<Item = String> {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        (0..count).map(move |_| {
+            let len = (rng.next() % 40) as usize;
+            (0..len).map(|_| rng.pick(ALPHABET)).collect()
+        })
+    }
+
+    /// The offsets are a promise to the editor: `start..end` must be the text
+    /// that will be sent to the server, on a character boundary, in order.
+    /// A panic from slicing here is the failure.
+    #[test]
+    fn arbitrary_input_keeps_the_offset_contract() {
+        // A generator that only produced empty strings would pass every
+        // assertion below, so the corpus is checked for coverage too.
+        let (mut statements, mut multi) = (0usize, 0usize);
+        for sql in cases(3_000) {
+            for dialect in DIALECTS {
+                let statements_here = split(&sql, dialect);
+                statements += statements_here.len();
+                if statements_here.len() > 1 {
+                    multi += 1;
+                }
+                let statements = statements_here;
+                let mut previous_end = 0;
+                for s in &statements {
+                    assert!(!s.sql.trim().is_empty(), "empty statement in {sql:?}");
+                    assert_eq!(&sql[s.start..s.end], s.sql, "offsets in {sql:?}");
+                    assert!(s.start >= previous_end, "overlapping statements in {sql:?}");
+                    previous_end = s.end;
+                    // "Run the statement under the cursor" at its own start
+                    // must select it, not a neighbour.
+                    assert_eq!(
+                        statement_at(&sql, s.start, dialect).map(|f| f.sql),
+                        Some(s.sql.clone()),
+                        "statement_at in {sql:?}"
+                    );
+                }
+            }
+        }
+        assert!(statements > 3_000, "only {statements} statements generated");
+        assert!(
+            multi > 100,
+            "only {multi} multi-statement buffers generated"
+        );
+    }
+
+    /// Running one statement must do what running the whole buffer does. If a
+    /// statement re-split into two, "run statement" and "run all" would
+    /// disagree about the same text.
+    #[test]
+    fn a_statement_splits_back_into_itself() {
+        for sql in cases(2_000) {
+            for dialect in DIALECTS {
+                for s in split(&sql, dialect) {
+                    let again = split(&s.sql, dialect);
+                    assert_eq!(again.len(), 1, "{:?} re-split in {sql:?}", s.sql);
+                    assert_eq!(again[0].sql, s.sql, "text changed in {sql:?}");
+                }
+            }
+        }
+    }
+}

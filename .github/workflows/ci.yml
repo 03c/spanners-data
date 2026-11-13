@@ -77,7 +77,10 @@ jobs:
           # One thread per test: the suites create and drop pid-named tables and
           # serialising keeps failure output readable. `--nocapture` also lets
           # the skip check below see the drivers' own messages.
-          cargo test -p spanners-driver-postgres -p spanners-app -- --test-threads=1 --nocapture 2>&1 | tee /tmp/pg.log
+          # The CLI is included because its end-to-end tests are the only ones
+          # that exercise the whole path a user takes: a URL, a profile, a
+          # password from the environment, and the policy verdict.
+          cargo test -p spanners-driver-postgres -p spanners-app -p spanners-cli -- --test-threads=1 --nocapture 2>&1 | tee /tmp/pg.log
           cargo test -p spanners-driver-mysql -- --test-threads=1 --nocapture 2>&1 | tee /tmp/mysql.log
           # A typo in the service env would make every test print "skipped" and
           # pass, which is worse than red.

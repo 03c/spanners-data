@@ -1414,3 +1414,160 @@ fn a_saved_query_without_a_connection_says_what_to_pass() {
     let run = spanners(f.home(), &["saved", "run", "loose", "-c", "demo"]);
     assert!(run.status.success(), "{}", stderr(&run));
 }
+
+// ---------------------------------------------------------------------------
+// Against real servers.
+//
+// Gated on the same variables as the driver and app suites, so the default
+// `cargo test` needs no Docker. These prove the whole CLI path — URL parsing,
+// saved profile, password from the environment, policy verdict, output — not
+// the wire protocol, which the driver suites already cover.
+// ---------------------------------------------------------------------------
+
+/// `scheme://user:pass@host:port/db` → a URL without the password, plus the
+/// password. Passing the password on the command line would store it in the
+/// OS keychain and leak it into the process list; tests use the documented
+/// environment variable instead.
+fn split_password(url: &str) -> (String, String) {
+    let (scheme, rest) = url.split_once("://").expect("a URL with a scheme");
+    let (authority, tail) = rest.split_once('@').expect("credentials in the URL");
+    let (user, password) = authority.split_once(':').expect("a password in the URL");
+    (format!("{scheme}://{user}@{tail}"), password.to_string())
+}
+
+fn spanners_with_password(
+    home: &std::path::Path,
+    args: &[&str],
+    variable: &str,
+    password: &str,
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_spanners"))
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .env(variable, password)
+        .output()
+        .expect("run spanners")
+}
+
+#[test]
+fn postgres_end_to_end_through_the_cli() {
+    let Ok(url) = std::env::var("SPANNERS_TEST_POSTGRES") else {
+        eprintln!("skipped: SPANNERS_TEST_POSTGRES not set");
+        return;
+    };
+    let (url, password) = split_password(&url);
+    let f = Fixture::new();
+
+    let added = spanners(f.home(), &["connections", "add", "pg", "--url", &url]);
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let q = spanners_with_password(
+        f.home(),
+        &["query", "-c", "pg", "--sql", "SELECT 1 AS n"],
+        "SPANNERS_PASSWORD",
+        &password,
+    );
+    assert!(q.status.success(), "{}", stderr(&q));
+    // Rows go to stdout, the summary to stderr, so a pipe gets clean data.
+    assert!(stdout(&q).contains('1'), "{}", stdout(&q));
+    assert!(stderr(&q).contains("1 row(s)"), "{}", stderr(&q));
+
+    // A script runs one statement at a time on a real server.
+    let script = spanners_with_password(
+        f.home(),
+        &["query", "-c", "pg", "--sql", "SELECT 1 AS n; SELECT 2 AS n"],
+        "SPANNERS_PASSWORD",
+        &password,
+    );
+    assert!(script.status.success(), "{}", stderr(&script));
+    // The per-statement progress marker is diagnostics, so it goes to stderr
+    // too and stdout stays concatenated data.
+    assert!(
+        stderr(&script).contains("statement 2/2"),
+        "{}",
+        stderr(&script)
+    );
+    assert!(stdout(&script).contains('2'), "{}", stdout(&script));
+
+    // Tightened to production, a write is refused before it reaches the server.
+    let tightened = spanners(
+        f.home(),
+        &[
+            "connections",
+            "set-profile",
+            "--connection",
+            "pg",
+            "production",
+        ],
+    );
+    assert!(tightened.status.success(), "{}", stderr(&tightened));
+
+    let read = spanners_with_password(
+        f.home(),
+        &["query", "-c", "pg", "--sql", "SELECT 1"],
+        "SPANNERS_PASSWORD",
+        &password,
+    );
+    assert!(read.status.success(), "{}", stderr(&read));
+
+    let write = spanners_with_password(
+        f.home(),
+        &[
+            "query",
+            "-c",
+            "pg",
+            "--sql",
+            "CREATE TABLE should_not_exist (x int)",
+        ],
+        "SPANNERS_PASSWORD",
+        &password,
+    );
+    assert!(!write.status.success());
+    assert!(stderr(&write).contains("blocked"), "{}", stderr(&write));
+}
+
+#[test]
+fn mysql_end_to_end_through_the_cli() {
+    let Ok(url) = std::env::var("SPANNERS_TEST_MYSQL") else {
+        eprintln!("skipped: SPANNERS_TEST_MYSQL not set");
+        return;
+    };
+    let (url, password) = split_password(&url);
+    let f = Fixture::new();
+
+    let added = spanners(f.home(), &["connections", "add", "my", "--url", &url]);
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let q = spanners_with_password(
+        f.home(),
+        &["query", "-c", "my", "--sql", "SELECT 1 AS n"],
+        "SPANNERS_PASSWORD",
+        &password,
+    );
+    assert!(q.status.success(), "{}", stderr(&q));
+    assert!(stdout(&q).contains('1'), "{}", stdout(&q));
+    assert!(stderr(&q).contains("1 row(s)"), "{}", stderr(&q));
+
+    // A failed statement exits non-zero and says what the server said.
+    let bad = spanners_with_password(
+        f.home(),
+        &[
+            "query",
+            "-c",
+            "my",
+            "--sql",
+            "SELECT * FROM no_such_table_here",
+        ],
+        "SPANNERS_PASSWORD",
+        &password,
+    );
+    assert!(!bad.status.success());
+    assert!(
+        stderr(&bad)
+            .to_ascii_lowercase()
+            .contains("no_such_table_here"),
+        "{}",
+        stderr(&bad)
+    );
+}

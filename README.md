@@ -37,10 +37,12 @@ same config, history and policy as the app will.
 cargo build --release -p spanners-cli
 S=target/release/spanners
 
-# A connection from a URL. The password goes to the OS keychain when there is
-# one, and is never written to config.toml. A connection without one prompts
-# on the first command, unless SPANNERS_PASSWORD or --password supplies it.
-$S connections add local --url "postgres://me@localhost/app?sslmode=require"
+# A connection from a URL, e.g. one already exported in your shell. Postgres,
+# MySQL and SQLite URLs all work; on Postgres, `?sslmode=require` insists on
+# TLS. The password goes to the OS keychain when there is one, and is never
+# written to config.toml. A connection without one prompts on the first
+# command, unless SPANNERS_PASSWORD or --password supplies it.
+$S connections add local --url "$DATABASE_URL"
 
 # Or bring the ones you already have. Found automatically, or pass --path.
 $S connections import --from dbeaver --dry-run

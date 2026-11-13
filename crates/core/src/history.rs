@@ -25,10 +25,11 @@ pub enum StoreError {
         #[source]
         source: rusqlite::Error,
     },
-    /// The file exists but is not a SQLite database, or a schema migration on
-    /// it failed. The message has to say what to do: the user cannot open the
-    /// app to fix it, and "file is not a database" with no filename sends them
-    /// hunting through the wrong directory.
+    /// The file is not a SQLite database, or its image is malformed. The
+    /// message has to say what to do: the user cannot open the app to fix it,
+    /// and "file is not a database" with no filename sends them hunting
+    /// through the wrong directory. Nothing is deleted automatically — history
+    /// is expendable, but discarding it silently is not the user's call.
     #[error(
         "{path} is not a usable history database ({source}); move it aside and Spanners will create a new one"
     )]
@@ -44,6 +45,16 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// True only for the two codes that mean "this file is not a database we can
+/// read". Everything else — busy, full, read-only, permissions — is a problem
+/// to fix, not a file to throw away.
+fn is_corruption(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase)
+    )
+}
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -216,9 +227,14 @@ impl Store {
         // Pragma and migration failures happen after a successful open, so they
         // arrive as a bare `Sql` error. A truncated file or something that is
         // not SQLite at all fails here, and the path is what makes the message
-        // actionable.
+        // actionable. A locked, full or read-only file arrives the same way and
+        // must *not* be called corrupt: telling someone to move a healthy
+        // database aside because the disk was full would lose their history.
         Self::from_connection(conn).map_err(|e| match e {
-            StoreError::Sql(source) => StoreError::Corrupt { path, source },
+            StoreError::Sql(source) if is_corruption(&source) => {
+                StoreError::Corrupt { path, source }
+            }
+            StoreError::Sql(source) => StoreError::Open { path, source },
             other => other,
         })
     }
@@ -773,6 +789,32 @@ mod tests {
         );
         assert!(message.contains("spanners.db"), "{message}");
         assert!(message.contains("move it aside"), "{message}");
+    }
+
+    #[test]
+    fn only_corruption_codes_are_called_corruption() {
+        let failure =
+            |code: i32| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+        use rusqlite::ffi;
+        assert!(is_corruption(&failure(ffi::SQLITE_CORRUPT)));
+        assert!(is_corruption(&failure(ffi::SQLITE_NOTADB)));
+        // A healthy database that is merely busy, full or read-only is not a
+        // file to discard.
+        assert!(!is_corruption(&failure(ffi::SQLITE_BUSY)));
+        assert!(!is_corruption(&failure(ffi::SQLITE_FULL)));
+        assert!(!is_corruption(&failure(ffi::SQLITE_READONLY)));
+        assert!(!is_corruption(&failure(ffi::SQLITE_PERM)));
+    }
+
+    #[test]
+    fn a_directory_is_reported_as_unopenable_not_as_corrupt() {
+        // A path that is a directory cannot be opened as a database. That is a
+        // wrong path to fix, not a file to move aside, so it must not get the
+        // corruption message.
+        let dir = tempfile::TempDir::new().unwrap();
+        let message = Store::open(dir.path()).unwrap_err().to_string();
+        assert!(message.contains("could not open"), "{message}");
+        assert!(!message.contains("move it aside"), "{message}");
     }
 
     #[test]
