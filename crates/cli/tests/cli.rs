@@ -694,3 +694,95 @@ fn a_short_timeout_is_honoured() {
         stderr(&out)
     );
 }
+
+#[test]
+fn a_buffer_runs_statement_by_statement() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2); SELECT count(*) AS n FROM t",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // The last statement's result is printed, and the earlier two ran.
+    assert!(stdout(&out).contains("n\n-\n2"), "{}", stdout(&out));
+    assert!(stderr(&out).contains("statement 3/3"), "{}", stderr(&out));
+}
+
+#[test]
+fn a_failing_statement_stops_the_buffer_and_says_which_one() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "INSERT INTO t VALUES (1); INSERT INTO missing VALUES (2); INSERT INTO t VALUES (3)",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("statement 2:"), "{}", stderr(&out));
+
+    // Statement 3 never ran.
+    let count = f.query("demo", "SELECT count(*) FROM t");
+    assert!(stdout(&count).contains('1'), "{}", stdout(&count));
+}
+
+#[test]
+fn a_failing_script_rolls_back_inside_a_transaction() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "INSERT INTO t VALUES (1); INSERT INTO missing VALUES (2)",
+            "--transaction",
+        ],
+    );
+    assert!(!out.status.success());
+
+    let count = f.query("demo", "SELECT count(*) FROM t");
+    assert!(stdout(&count).contains('0'), "{}", stdout(&count));
+}
+
+#[test]
+fn csv_output_refuses_a_multi_statement_buffer() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "SELECT 1; SELECT 2",
+            "--format",
+            "csv",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("takes one statement"),
+        "{}",
+        stderr(&out)
+    );
+}

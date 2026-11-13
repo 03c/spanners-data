@@ -372,7 +372,15 @@ fn stream_query(
     events: &mpsc::Sender<QueryEvent>,
     started: Instant,
 ) -> std::result::Result<(), String> {
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(sql).map_err(|e| match e {
+        // rusqlite refuses a buffer with a second statement. Say what to do
+        // about it instead of echoing "Multiple statements provided".
+        rusqlite::Error::MultipleStatement => {
+            "SQLite runs one statement at a time; there is more than one here. Run them one by one."
+                .to_string()
+        }
+        other => other.to_string(),
+    })?;
 
     let cols: Vec<rusqlite::Column<'_>> = stmt.columns().into_iter().collect();
     let decltypes: Vec<String> = cols

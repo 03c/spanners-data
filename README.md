@@ -18,7 +18,7 @@ the shell decision, which is the only remaining blocker.
 | Postgres driver | done: streaming, `pg_cancel_backend`, statement timeout, caps |
 | MySQL driver | done: streaming, `KILL QUERY`, `max_execution_time`, caps |
 | App services (`spanners-app`) | done: connect, guarded run, cancel, schema, explain, export, history, saved queries |
-| CLI (`spanners`) | done: connections (add from URL, set-profile), query, export, history, check, schema, explain — same config, history and policy as the app |
+| CLI (`spanners`) | done: connections (add from URL, set-profile), query (single statement or a whole script), export, history, check, schema, explain — same config, history and policy as the app |
 | History + saved queries | done: one SQLite file, shared search, 10k/90-day prune |
 | Export | done: streaming CSV and JSON Lines, cap-aware, backs clipboard copy |
 | Dialect keywords | done: per-driver lists for highlighting and autocomplete |

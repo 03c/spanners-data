@@ -449,19 +449,35 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         eprintln!("writes unlocked for this run");
     }
-    let sql = match statement {
-        Some(n) => pick_statement(app, &id, &sql, n)?,
-        None => sql,
-    };
-    let sql = sql.as_str();
 
-    if transaction {
-        app.begin(&id).await.map_err(|e| e.to_string())?;
-    }
+    // A buffer is run statement by statement, the way the editor will: a
+    // driver executes exactly one statement, and running half a script while
+    // reporting success is not acceptable.
+    let statements = select_statements(app, &id, &sql, statement)?;
+    let exec = ExecOpts {
+        max_rows,
+        timeout: timeout_opt(timeout),
+        ..ExecOpts::default()
+    };
 
     // CSV and JSON Lines go through the export engine, so a NULL, an empty
     // string and duplicate column names mean the same thing here as in a file.
+    // One result set per file, so one statement.
     if format != Output::Table {
+        let sql = match statements.as_slice() {
+            [one] => one,
+            _ => {
+                return Err(format!(
+                    "{} output takes one statement; this buffer has {} (use --statement N)",
+                    if format == Output::Jsonl {
+                        "JSON Lines"
+                    } else {
+                        "CSV"
+                    },
+                    statements.len()
+                ))
+            }
+        };
         let opts = ExportOpts {
             format: if format == Output::Jsonl {
                 Format::JsonLines
@@ -471,11 +487,9 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
             header: true,
             null: NullRepr::Marker("\\N".into()),
         };
-        let exec = ExecOpts {
-            max_rows,
-            timeout: timeout_opt(timeout),
-            ..ExecOpts::default()
-        };
+        if transaction {
+            app.begin(&id).await.map_err(|e| e.to_string())?;
+        }
         let mut stdout = tokio::io::stdout();
         let summary = match app
             .export_with_exec(&id, sql, exec, &opts, yes, &mut stdout)
@@ -509,13 +523,42 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let exec = ExecOpts {
-        max_rows,
-        timeout: timeout_opt(timeout),
-        ..ExecOpts::default()
-    };
+    if transaction {
+        app.begin(&id).await.map_err(|e| e.to_string())?;
+    }
+    let total = statements.len();
+    for (i, sql) in statements.iter().enumerate() {
+        if total > 1 {
+            eprintln!("-- statement {}/{total}", i + 1);
+        }
+        if let Err(e) = run_table(app, &id, sql, exec.clone(), yes).await {
+            if transaction {
+                let _ = app.rollback(&id).await;
+            }
+            return Err(if total > 1 {
+                format!("statement {}: {e}", i + 1)
+            } else {
+                e
+            });
+        }
+    }
+    if transaction {
+        app.commit(&id).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Run one statement and print it as a table, block by block.
+async fn run_table(
+    app: &mut App,
+    id: &str,
+    sql: &str,
+    exec: ExecOpts,
+    yes: bool,
+) -> Result<(), String> {
+    let cap = exec.max_rows;
     let mut run = match app
-        .run_with_exec(&id, sql, exec, yes)
+        .run_with_exec(id, sql, exec, yes)
         .await
         .map_err(|e| e.to_string())?
     {
@@ -547,7 +590,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
             }
             QueryEvent::Batch { rows: batch, .. } => {
                 for row in &batch {
-                    if let Some(cap) = max_rows {
+                    if let Some(cap) = cap {
                         if printed >= cap as usize {
                             continue;
                         }
@@ -582,25 +625,33 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
     }
 
     match error {
-        Some(e) => {
-            if transaction {
-                let _ = app.rollback(&id).await;
-            }
-            Err(e)
-        }
-        None if done => {
-            if transaction {
-                app.commit(&id).await.map_err(|e| e.to_string())?;
-            }
-            Ok(())
-        }
-        None => {
-            if transaction {
-                let _ = app.rollback(&id).await;
-            }
-            Err("query ended without a result".into())
-        }
+        Some(e) => Err(e),
+        None if done => Ok(()),
+        None => Err("query ended without a result".into()),
     }
+}
+
+/// The statements a run should execute: one chosen with `--statement`, or all
+/// of them in order.
+fn select_statements(
+    app: &App,
+    id: &str,
+    sql: &str,
+    statement: Option<usize>,
+) -> Result<Vec<String>, String> {
+    if let Some(n) = statement {
+        return Ok(vec![pick_statement(app, id, sql, n)?]);
+    }
+    let statements = app
+        .statements(id, sql)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|s| s.sql)
+        .collect::<Vec<_>>();
+    if statements.is_empty() {
+        return Err("there is no statement to run".into());
+    }
+    Ok(statements)
 }
 
 struct ExportArgs {
@@ -631,11 +682,17 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
     app.connect(&id, password)
         .await
         .map_err(|e| e.to_string())?;
-    let sql = match statement {
-        Some(n) => pick_statement(app, &id, &sql, n)?,
-        None => sql,
+    // One result set per file, so one statement.
+    let statements = select_statements(app, &id, &sql, statement)?;
+    let sql = match statements.as_slice() {
+        [one] => one.as_str(),
+        _ => {
+            return Err(format!(
+                "export takes one statement; this buffer has {} (use --statement N)",
+                statements.len()
+            ))
+        }
     };
-    let sql = sql.as_str();
     let out = out.as_str();
 
     if transaction {

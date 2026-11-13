@@ -315,3 +315,46 @@ async fn a_read_only_open_says_why_a_missing_file_cannot_be_created() {
     assert!(err.to_string().contains("does not exist"), "{err}");
     assert!(err.to_string().contains("cannot create it"), "{err}");
 }
+
+#[tokio::test]
+async fn a_second_statement_is_refused_rather_than_half_run() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(&dir);
+    let s = open(&path, false).await;
+    let (tx, mut rx) = mpsc::channel(16);
+    s.execute(
+        "CREATE TABLE a (id int); INSERT INTO a VALUES (1)",
+        ExecOpts::default(),
+        tx,
+    )
+    .await
+    .expect("execute");
+
+    let mut failed = None;
+    while let Some(event) = rx.recv().await {
+        if let QueryEvent::Failed { message, .. } = event {
+            failed = Some(message);
+        }
+    }
+    assert!(failed.is_some(), "expected a failure, not a partial run");
+
+    // The important part: the first statement did not run either. rusqlite
+    // reports the *tail's* prepare error (here "no such table: a"), which is
+    // why the app splits buffers before it gets this far.
+    let (tx, mut rx) = mpsc::channel(16);
+    s.execute("SELECT count(*) FROM a", ExecOpts::default(), tx)
+        .await
+        .expect("execute");
+    let mut failed = None;
+    while let Some(event) = rx.recv().await {
+        if let QueryEvent::Failed { message, .. } = event {
+            failed = Some(message);
+        }
+    }
+    assert!(
+        failed
+            .as_deref()
+            .is_some_and(|m| m.contains("no such table")),
+        "the CREATE TABLE should not have run: {failed:?}"
+    );
+}

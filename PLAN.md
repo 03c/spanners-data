@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections, query (table/csv/jsonl), export, history, check, schema, explain; same config, history and policy as the app |
-| Tests | 207: 100 core, 37 app, 3 app end-to-end against real servers, 26 CLI (24 process-level), 17 driver integration, 23 driver unit/registry |
+| Tests | 212: 100 core, 37 app, 3 app end-to-end against real servers, 30 CLI (28 process-level), 17 driver integration, 24 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -343,7 +343,9 @@ disconnecting with an open transaction rolls back (with a confirm prompt).
 
 No inline table editing, no ER diagrams, no SSH tunnels, no cloud IAM auth, no
 custom CA/mTLS UI, no cross-database joins, no plugin marketplace, no team
-sync/sharing, no MSI installer. Each is a deliberate v2 candidate; the trait and
+sync/sharing, no MSI installer. MySQL `DELIMITER` blocks are not understood
+either: the splitter reads statements, not client directives, so a stored
+procedure body with `;` inside is not edited as one unit in v1. Each is a deliberate v2 candidate; the trait and
 config schema leave room.
 
 ## 6. Milestones
