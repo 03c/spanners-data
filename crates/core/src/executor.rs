@@ -52,7 +52,7 @@ pub async fn execute_guarded_with(
     policy: &Policy,
     sql: &str,
     dialect: Dialect,
-    mut exec: ExecOpts,
+    exec: ExecOpts,
     confirmed: bool,
 ) -> Result<Gate, DriverError> {
     let in_transaction = session.in_transaction().await;
@@ -60,14 +60,9 @@ pub async fn execute_guarded_with(
         Verdict::Block { reasons } => Ok(Gate::Blocked { reasons }),
         Verdict::Confirm { reasons } if !confirmed => Ok(Gate::NeedsConfirmation { reasons }),
         Verdict::Confirm { .. } | Verdict::Allow => {
-            let base = policy.exec_opts();
-            exec.max_rows = match (exec.max_rows, base.max_rows) {
-                (Some(want), Some(allowed)) => Some(want.min(allowed)),
-                (Some(want), None) => Some(want),
-                (None, allowed) => allowed,
-            };
-            exec.timeout = exec.timeout.or(base.timeout);
-            exec.read_only |= base.read_only;
+            // The policy is a floor, not a suggestion: the caller can ask for
+            // fewer rows or a shorter deadline, never more.
+            let exec = exec.tightened_by(&policy.exec_opts());
             let (tx, rx) = mpsc::channel(8);
             let query_id = session.execute(sql, exec, tx).await?;
             Ok(Gate::Run {
@@ -236,6 +231,48 @@ mod tests {
             }
         }
         assert_eq!(done, Some((2, true)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_caller_cannot_extend_the_profile_timeout() {
+        let dir = TempDir::new().unwrap();
+        let s = session(&dir, false).await;
+
+        // The profile says 50 ms; the caller asks for 30 s. If the caller won,
+        // this query would run for minutes.
+        let mut policy = Policy::preset(Profile::Local);
+        policy.timeout = Some(std::time::Duration::from_millis(50));
+
+        let gate = execute_guarded_with(
+            s.as_ref(),
+            &policy,
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000000)
+             SELECT i FROM n",
+            Dialect::Sqlite,
+            ExecOpts {
+                timeout: Some(std::time::Duration::from_secs(30)),
+                ..ExecOpts::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let mut events = match gate {
+            Gate::Run { events, .. } => events,
+            other => panic!("expected to run, got {other:?}"),
+        };
+        let mut code = None;
+        while let Some(event) = events.recv().await {
+            if let QueryEvent::Failed { code: c, .. } = event {
+                code = c;
+            }
+        }
+        assert_eq!(
+            code.as_deref(),
+            Some(spanners_driver_api::codes::TIMEOUT),
+            "the profile's deadline should have stopped it"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

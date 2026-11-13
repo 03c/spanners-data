@@ -79,6 +79,29 @@ pub struct ExecOpts {
     pub read_only: bool,
 }
 
+impl ExecOpts {
+    /// Combine a per-statement request with a connection's limits.
+    ///
+    /// The stricter side wins for every field: a caller may ask for fewer rows
+    /// or a shorter deadline, never more, and a read-only limit cannot be
+    /// switched off by passing a permissive `ExecOpts`. `None` means "no
+    /// opinion" and yields to the other side, so the caller can leave the
+    /// profile's values alone.
+    pub fn tightened_by(&self, limits: &ExecOpts) -> ExecOpts {
+        ExecOpts {
+            max_rows: match (self.max_rows, limits.max_rows) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+            timeout: match (self.timeout, limits.timeout) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+            read_only: self.read_only || limits.read_only,
+        }
+    }
+}
+
 /// Streamed as the driver produces rows. Batches are bounded (target: <= 500
 /// rows) so the UI and the IPC boundary never see an unbounded allocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,4 +321,50 @@ pub struct TableColumn {
 pub struct Plan {
     pub raw: String,
     pub json: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tightened_by_takes_the_stricter_limit() {
+        let profile = ExecOpts {
+            max_rows: Some(200),
+            timeout: Some(Duration::from_secs(15)),
+            read_only: true,
+        };
+
+        // No opinion yields to the profile.
+        let none = ExecOpts::default();
+        assert_eq!(none.tightened_by(&profile), profile);
+
+        // Asking for more is refused, field by field.
+        let greedy = ExecOpts {
+            max_rows: Some(10_000),
+            timeout: Some(Duration::from_secs(600)),
+            read_only: false,
+        };
+        assert_eq!(greedy.tightened_by(&profile), profile);
+
+        // Asking for less is honoured.
+        let modest = ExecOpts {
+            max_rows: Some(50),
+            timeout: Some(Duration::from_secs(2)),
+            read_only: false,
+        };
+        assert_eq!(
+            modest.tightened_by(&profile),
+            ExecOpts {
+                max_rows: Some(50),
+                timeout: Some(Duration::from_secs(2)),
+                read_only: true,
+            }
+        );
+
+        // An unlimited profile lets the caller set anything, including nothing.
+        let local = ExecOpts::default();
+        assert_eq!(greedy.tightened_by(&local), greedy);
+        assert_eq!(none.tightened_by(&local), local);
+    }
 }

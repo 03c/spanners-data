@@ -862,7 +862,7 @@ impl App {
         &mut self,
         id: &str,
         sql: &str,
-        mut exec: ExecOpts,
+        exec: ExecOpts,
         opts: &ExportOpts,
         confirmed: bool,
         out: &mut W,
@@ -886,14 +886,10 @@ impl App {
             spanners_core::Verdict::Confirm { .. } => {}
         }
 
-        let policy = &live.policy;
-        exec.max_rows = match (exec.max_rows, policy.max_rows) {
-            (Some(requested), Some(allowed)) => Some(requested.min(allowed)),
-            (Some(requested), None) => Some(requested),
-            (None, allowed) => allowed,
-        };
-        exec.timeout = exec.timeout.or(policy.timeout);
-        exec.read_only |= policy.read_only;
+        // Same rule as a guarded run: a caller may tighten the profile's
+        // limits, never loosen them. The timeout used to be "caller wins",
+        // which let `--timeout 600` lift a production connection's 15 s.
+        let exec = exec.tightened_by(&live.policy.exec_opts());
 
         let started_at = now_ms();
         let started = Instant::now();
