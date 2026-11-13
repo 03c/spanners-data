@@ -6,11 +6,12 @@
 //! that can only be driven by a mouse is not useful in a shell, and because it
 //! makes the whole stack testable end to end before any window exists.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use spanners_app::{App, RunOutcome};
+use spanners_app::{App, AppError, RunOutcome};
 use spanners_core::config::Connection;
 use spanners_core::export::{ExportOpts, Format, NullRepr};
 use spanners_core::{Policy, Profile, Verdict, Violation};
@@ -671,10 +672,20 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
                 .connection(&id)
                 .ok_or_else(|| format!("no connection {id}"))?
                 .clone();
-            let info = app
-                .test_connection(&conn, password)
-                .await
-                .map_err(|e| e.to_string())?;
+            let info = match app.test_connection(&conn, password).await {
+                Err(AppError::PasswordRequired { .. }) => {
+                    let Some(password) = ask_password(&conn.name)? else {
+                        return Err(format!(
+                            "connection {} needs a password; pass --password or set SPANNERS_PASSWORD",
+                            conn.name
+                        ));
+                    };
+                    app.test_connection(&conn, Some(password))
+                        .await
+                        .map_err(|e| e.to_string())?
+                }
+                other => other.map_err(|e| e.to_string())?,
+            };
             println!(
                 "ok\t{}\t{}\tread_only={}",
                 info.server_version, info.driver, info.read_only
@@ -711,9 +722,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         timeout,
     } = args;
     let id = resolve(app, &connection)?;
-    app.connect(&id, password)
-        .await
-        .map_err(|e| e.to_string())?;
+    connect(app, &id, password).await?;
 
     if let Some(confirmation) = unlock_writes {
         app.unlock_writes(&id, &confirmation)
@@ -984,9 +993,7 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
         password,
     } = args;
     let id = resolve(app, &connection)?;
-    app.connect(&id, password)
-        .await
-        .map_err(|e| e.to_string())?;
+    connect(app, &id, password).await?;
     // One result set per file, so one statement.
     let statements = select_statements(app, &id, &sql, statement)?;
     let sql = match statements.as_slice() {
@@ -1216,9 +1223,7 @@ async fn schema(
     password: Option<String>,
 ) -> Result<(), String> {
     let id = resolve(app, connection)?;
-    app.connect(&id, password)
-        .await
-        .map_err(|e| e.to_string())?;
+    connect(app, &id, password).await?;
     let schema = app.schema(&id).await.map_err(|e| e.to_string())?;
 
     let matches = |name: &str| match filter {
@@ -1270,9 +1275,7 @@ async fn explain(
     password: Option<String>,
 ) -> Result<(), String> {
     let id = resolve(app, connection)?;
-    app.connect(&id, password)
-        .await
-        .map_err(|e| e.to_string())?;
+    connect(app, &id, password).await?;
     let plan = app.explain(&id, sql).await.map_err(|e| e.to_string())?;
     if as_json {
         if let Some(json) = plan.json {
@@ -1370,6 +1373,44 @@ fn parse_profile(value: &str) -> Result<Profile, String> {
             "unknown profile '{other}'; use local, staging or production"
         )),
     }
+}
+
+/// Connect, asking for a password when the connection needs one and there is
+/// a terminal to ask on.
+///
+/// `--password` and `SPANNERS_PASSWORD` still win. Prompting is the better
+/// default because a password passed as an argument is visible in `ps` and in
+/// shell history.
+async fn connect(app: &mut App, id: &str, password: Option<String>) -> Result<(), String> {
+    match app.connect(id, password).await {
+        Ok(_) => Ok(()),
+        Err(AppError::PasswordRequired { .. }) => {
+            let name = app
+                .connection(id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| id.to_string());
+            let Some(password) = ask_password(&name)? else {
+                return Err(format!(
+                    "connection {name} needs a password; pass --password or set SPANNERS_PASSWORD"
+                ));
+            };
+            app.connect(id, Some(password))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Read a password from the terminal, or `None` when there is no terminal.
+fn ask_password(name: &str) -> Result<Option<String>, String> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    let password = rpassword::prompt_password(format!("password for {name}: "))
+        .map_err(|e| format!("could not read the password: {e}"))?;
+    Ok(Some(password))
 }
 
 fn read_sql(input: &str) -> Result<String, String> {

@@ -1306,3 +1306,36 @@ fn export_refuses_table_output_instead_of_writing_csv() {
     );
     assert!(!path.exists());
 }
+
+#[test]
+fn a_missing_password_says_how_to_supply_it() {
+    let f = Fixture::new();
+    let added = spanners(
+        f.home(),
+        &[
+            "connections",
+            "add",
+            "pg",
+            "--url",
+            "postgres://someone@127.0.0.1:1/db",
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    // stdin is /dev/null, so there is no terminal to prompt on: the command
+    // must fail with instructions rather than wait for input or attempt a
+    // connection it cannot authenticate.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_spanners"))
+        .arg("--home")
+        .arg(f.home())
+        .args(["query", "-c", "pg", "--sql", "SELECT 1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run spanners");
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("needs a password"), "{err}");
+    assert!(err.contains("SPANNERS_PASSWORD"), "{err}");
+}

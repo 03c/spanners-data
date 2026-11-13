@@ -38,7 +38,8 @@ cargo build --release -p spanners-cli
 S=target/release/spanners
 
 # A connection from a URL. The password goes to the OS keychain when there is
-# one, and is never written to config.toml.
+# one, and is never written to config.toml. A connection without one prompts
+# on the first command, unless SPANNERS_PASSWORD or --password supplies it.
 $S connections add local --url "postgres://me@localhost/app?sslmode=require"
 
 # Or bring the ones you already have. Found automatically, or pass --path.
