@@ -12,9 +12,10 @@ Plan of record. Status: draft for review.
 | `spanners-driver-postgres` | streaming, `pg_cancel_backend` cancel, `statement_timeout`, fetch-stop caps with bounded resync, schema, `EXPLAIN (FORMAT JSON)` |
 | `spanners-driver-mysql` | streaming, `KILL QUERY` cancel, `max_execution_time`, fetch-stop caps with bounded resync, schema, `EXPLAIN FORMAT=JSON` |
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
-| Tests | 79: 47 core (policy/classification/history/export), 15 driver integration against real servers, 17 driver unit |
+| `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
+| Tests | 114: 56 core, 20 app, 3 app end-to-end against real servers, 15 driver integration, 20 driver unit |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
-| CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; dedicated Postgres+MySQL service-container job |
+| CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
 | Shell | undecided — M-1 measurements pending on your machines |
 

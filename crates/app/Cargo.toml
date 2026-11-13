@@ -1,0 +1,30 @@
+[package]
+name = "spanners-app"
+description = "Application services for Spanners Data: connections, sessions, history and export, independent of the UI shell."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["os-keyring"]
+# Compiled only when the OS keychain is wanted. The app works without it: the
+# password is then held for the session and re-prompted on restart.
+os-keyring = ["dep:keyring"]
+
+[dependencies]
+spanners-core.workspace = true
+spanners-driver-api.workspace = true
+spanners-registry.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+keyring = { version = "3", optional = true, default-features = false, features = [
+    "linux-native",
+    "apple-native",
+    "windows-native",
+] }
+
+[dev-dependencies]
+spanners-driver-sqlite.workspace = true
+tempfile = "3.27"

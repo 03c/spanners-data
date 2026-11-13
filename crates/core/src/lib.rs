@@ -1,6 +1,7 @@
 //! Core domain: what a connection *is*, and what it is allowed to do.
 
 pub mod config;
+pub mod dialect;
 pub mod executor;
 pub mod export;
 pub mod history;

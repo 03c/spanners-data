@@ -4,6 +4,7 @@ exclude = ["apps/spike-egui", "apps/spike-tauri/src-tauri"]
 members = [
     "crates/driver-api",
     "crates/core",
+    "crates/app",
     "crates/driver-sqlite",
     "crates/registry",
     "crates/driver-postgres",
@@ -25,6 +26,8 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 
 spanners-driver-api = { path = "crates/driver-api" }
+spanners-core = { path = "crates/core" }
+spanners-registry = { path = "crates/registry" }
 spanners-driver-sqlite = { path = "crates/driver-sqlite" }
 spanners-driver-postgres = { path = "crates/driver-postgres" }
 spanners-driver-mysql = { path = "crates/driver-mysql" }

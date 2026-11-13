@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use spanners_driver_api::Dialect;
+use spanners_driver_api::{ConnConfig, Dialect};
 
 use crate::policy::{Policy, PolicyOverrides, Profile};
 
@@ -104,6 +104,81 @@ impl Connection {
     pub fn is_embedded(&self) -> bool {
         self.driver == "sqlite"
     }
+
+    /// Runtime connection parameters. The password is supplied by the caller
+    /// from the keychain, or by a prompt when no keychain is available; it is
+    /// never read from the persisted [`Connection`].
+    pub fn to_conn_config(&self, password: Option<String>) -> ConnConfig {
+        ConnConfig {
+            driver: self.driver.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            // SQLite keeps its file path in `database`; drivers treat it as such.
+            database: self.database.clone(),
+            username: self.username.clone(),
+            password,
+            params: Vec::new(),
+        }
+    }
+}
+
+/// Replace anything secret in a connection string before it reaches a log.
+///
+/// Deliberately conservative: passwords in the authority and any `password=`
+/// query parameter are replaced, but the rest of the string is left alone so
+/// the log still says which host failed.
+pub fn redact_dsn(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+
+    // Credentials live between "scheme://" and the first '/' or '?' after it.
+    let authority_start = input.find("://").map(|i| i + 3);
+    match authority_start {
+        Some(start) => {
+            let rest = &input[start..];
+            let end = rest
+                .find(['/', '?'])
+                .map(|i| start + i)
+                .unwrap_or(input.len());
+            let authority = &input[start..end];
+            out.push_str(&input[..start]);
+            match authority.rsplit_once('@') {
+                Some((creds, host)) => {
+                    match creds.split_once(':') {
+                        Some((user, _password)) => {
+                            out.push_str(user);
+                            out.push_str(":***@");
+                        }
+                        // No colon means no password to hide.
+                        None => {
+                            out.push_str(creds);
+                            out.push('@');
+                        }
+                    }
+                    out.push_str(host);
+                }
+                None => out.push_str(authority),
+            }
+            out.push_str(&input[end..]);
+        }
+        None => out.push_str(input),
+    }
+
+    redact_password_params(&out)
+}
+
+fn redact_password_params(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.to_ascii_lowercase().find("password=") {
+        let (head, tail) = rest.split_at(pos + "password=".len());
+        out.push_str(head);
+        // Value ends at the next separator or the end of the string.
+        let value_end = tail.find(['&', ';', ' ']).unwrap_or(tail.len());
+        out.push_str("***");
+        rest = &tail[value_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Ids are opaque and stable; they key the keychain entry and the history rows,
@@ -188,10 +263,44 @@ impl ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spanners_driver_api::Dialect;
     use tempfile::TempDir;
 
     fn store(dir: &TempDir) -> ConfigStore {
         ConfigStore::new(dir.path().join("nested/config.toml"))
+    }
+
+    #[test]
+    fn a_password_never_leaks_into_the_persisted_config() {
+        let c = Connection::new("live", "postgres", Profile::Production);
+        let runtime = c.to_conn_config(Some("hunter2".into()));
+        assert_eq!(runtime.password.as_deref(), Some("hunter2"));
+        assert_eq!(c.dialect(), Some(Dialect::Postgres));
+
+        let toml = toml::to_string(&c).unwrap();
+        assert!(!toml.contains("hunter2"));
+    }
+
+    #[test]
+    fn redacts_passwords_in_dsns() {
+        assert_eq!(
+            redact_dsn("postgres://ada:hunter2@db.example:5432/app"),
+            "postgres://ada:***@db.example:5432/app"
+        );
+        assert_eq!(
+            redact_dsn("mysql://root:secret@127.0.0.1:3306/spanners?ssl=true"),
+            "mysql://root:***@127.0.0.1:3306/spanners?ssl=true"
+        );
+        assert_eq!(
+            redact_dsn("postgres://db.example/app?user=ada&password=hunter2&sslmode=require"),
+            "postgres://db.example/app?user=ada&password=***&sslmode=require"
+        );
+        // Nothing to hide, nothing changed.
+        assert_eq!(redact_dsn("sqlite:///tmp/app.db"), "sqlite:///tmp/app.db");
+        assert_eq!(
+            redact_dsn("postgres://db.example/app"),
+            "postgres://db.example/app"
+        );
     }
 
     #[test]

@@ -67,10 +67,6 @@ pub struct ExportOpts {
     pub header: bool,
     /// CSV only.
     pub null: NullRepr,
-    /// Same contract as [`ExecOpts::max_rows`]: the profile's cap applies to
-    /// exports too, so a "read-only, 200 rows" connection cannot be turned into
-    /// a full dump by exporting.
-    pub max_rows: Option<u32>,
 }
 
 impl Default for ExportOpts {
@@ -79,7 +75,6 @@ impl Default for ExportOpts {
             format: Format::Csv,
             header: true,
             null: NullRepr::Empty,
-            max_rows: None,
         }
     }
 }
@@ -94,27 +89,20 @@ pub struct ExportSummary {
 
 /// Run `sql` and stream its rows into `out`.
 ///
-/// Stops at `opts.max_rows` exactly like the grid does, via the driver's
-/// fetch-stop, so the summary reports truncation rather than silently
-/// pretending the export was complete.
+/// `exec` carries the same limits the grid would use; callers pass
+/// `policy.exec_opts()`, so a "read-only, 200 rows" connection cannot be turned
+/// into a full dump by exporting. The driver's fetch-stop does the cutting, so
+/// the summary reports truncation rather than pretending the export was
+/// complete.
 pub async fn export<W: AsyncWrite + Unpin>(
     session: &dyn Session,
     sql: &str,
+    exec: ExecOpts,
     opts: &ExportOpts,
     out: &mut W,
 ) -> Result<ExportSummary> {
     let (tx, mut rx) = mpsc::channel::<QueryEvent>(16);
-    session
-        .execute(
-            sql,
-            ExecOpts {
-                max_rows: opts.max_rows,
-                timeout: None,
-                read_only: false,
-            },
-            tx,
-        )
-        .await?;
+    session.execute(sql, exec, tx).await?;
 
     let mut keys: Vec<String> = Vec::new();
     let mut rows_written: u64 = 0;
@@ -542,6 +530,7 @@ mod tests {
         let summary = export(
             &*s,
             "SELECT id, name, note FROM t ORDER BY id",
+            ExecOpts::default(),
             &ExportOpts::default(),
             &mut out,
         )
@@ -568,11 +557,16 @@ mod tests {
             format: Format::JsonLines,
             header: false,
             null: NullRepr::default(),
-            max_rows: None,
         };
-        export(&*s, "SELECT id, name FROM t", &opts, &mut out)
-            .await
-            .unwrap();
+        export(
+            &*s,
+            "SELECT id, name FROM t",
+            ExecOpts::default(),
+            &opts,
+            &mut out,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(out.as_str().unwrap(), "{\"id\":1,\"name\":null}\n");
     }
@@ -589,14 +583,19 @@ mod tests {
         .await;
 
         let mut out = Buffer::new();
-        let opts = ExportOpts {
+        let exec = ExecOpts {
             max_rows: Some(10),
-            null: NullRepr::Empty,
-            ..ExportOpts::default()
+            ..ExecOpts::default()
         };
-        let summary = export(&*s, "SELECT n FROM t", &opts, &mut out)
-            .await
-            .unwrap();
+        let summary = export(
+            &*s,
+            "SELECT n FROM t",
+            exec,
+            &ExportOpts::default(),
+            &mut out,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(summary.rows, 10);
         assert!(summary.truncated);
@@ -607,9 +606,15 @@ mod tests {
     async fn a_failing_query_returns_the_server_error() {
         let s = sqlite().await;
         let mut out = Buffer::new();
-        let err = export(&*s, "SELECT * FROM nope", &ExportOpts::default(), &mut out)
-            .await
-            .unwrap_err();
+        let err = export(
+            &*s,
+            "SELECT * FROM nope",
+            ExecOpts::default(),
+            &ExportOpts::default(),
+            &mut out,
+        )
+        .await
+        .unwrap_err();
         match err {
             ExportError::Query { message, .. } => {
                 assert!(message.contains("no such table"), "{message}")
