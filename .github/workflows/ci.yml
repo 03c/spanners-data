@@ -32,6 +32,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: build without the OS keychain
+        # The fallback path (session-only passwords) must keep compiling.
+        run: cargo test -p spanners-app --no-default-features
 
   drivers:
     name: driver integration (Linux)

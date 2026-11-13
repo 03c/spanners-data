@@ -313,6 +313,55 @@ async fn a_remembered_password_is_used_for_the_next_connect() {
 }
 
 #[tokio::test]
+async fn testing_a_connection_does_not_adopt_or_save_it() {
+    let dir = TempDir::new().unwrap();
+    let app = app_with(&dir).await;
+    let conn = local_sqlite(&dir);
+
+    let info = app.test_connection(&conn, None).await.unwrap();
+    assert_eq!(info.driver, "sqlite");
+
+    // Nothing was persisted and no session was kept.
+    assert!(app.connections().is_empty());
+    assert!(!app.is_connected(&conn.id));
+}
+
+#[tokio::test]
+async fn testing_an_unknown_driver_fails_clearly() {
+    let dir = TempDir::new().unwrap();
+    let app = app_with(&dir).await;
+    let conn = Connection::new("nope", "oracle", Profile::Local);
+    assert!(matches!(
+        app.test_connection(&conn, None).await,
+        Err(AppError::UnknownDriver(_))
+    ));
+}
+
+#[tokio::test]
+async fn reconnect_opens_a_fresh_session() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    let info = app.reconnect(&id).await.unwrap();
+    assert_eq!(info.connection_id, id);
+    assert!(app.is_connected(&id));
+
+    // And it is actually usable.
+    let mut run = match app.run(&id, "SELECT 1", false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    let events = drain(&mut run).await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, QueryEvent::Done { row_count: 1, .. })));
+}
+
+#[tokio::test]
 async fn judge_answers_without_running_anything() {
     let dir = TempDir::new().unwrap();
     let mut conn = local_sqlite(&dir);

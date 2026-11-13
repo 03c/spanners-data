@@ -303,6 +303,50 @@ impl App {
         Ok(info)
     }
 
+    /// Try a connection without adopting it: the "Test" button in the
+    /// connection dialog. Nothing is saved, so a typo cannot overwrite the
+    /// working configuration.
+    pub async fn test_connection(
+        &self,
+        connection: &Connection,
+        password: Option<String>,
+    ) -> Result<SessionInfo> {
+        let driver = self
+            .registry
+            .get(&connection.driver)
+            .ok_or_else(|| AppError::UnknownDriver(connection.driver.clone()))?;
+        let policy = connection.policy();
+        let dialect = connection.dialect().unwrap_or_else(|| driver.dialect());
+
+        let session = driver
+            .connect(
+                &connection.to_conn_config(password),
+                SessionOpts {
+                    read_only: policy.read_only,
+                    timeout: policy.timeout,
+                },
+            )
+            .await?;
+
+        let info = SessionInfo {
+            connection_id: connection.id.clone(),
+            driver: connection.driver.clone(),
+            dialect,
+            server_version: session.server_version().to_string(),
+            read_only: policy.read_only,
+            max_rows: policy.max_rows,
+        };
+        session.close().await?;
+        Ok(info)
+    }
+
+    /// Drop the session and open a new one, keeping the stored password. Used
+    /// after a driver reports `DISCONNECTED`.
+    pub async fn reconnect(&mut self, id: &str) -> Result<SessionInfo> {
+        self.disconnect(id).await?;
+        self.connect(id, None).await
+    }
+
     pub async fn disconnect(&mut self, id: &str) -> Result<()> {
         match self.live.remove(id) {
             Some(live) => {
