@@ -1159,3 +1159,95 @@ fn importing_a_file_without_connections_is_an_error() {
         stderr(&out)
     );
 }
+
+#[test]
+fn check_and_explain_read_sql_from_stdin() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_spanners"))
+        .arg("--home")
+        .arg(f.home())
+        .args(["check", "-c", "demo", "--sql", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"SELECT 1")
+            .unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "allow");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_spanners"))
+        .arg("--home")
+        .arg(f.home())
+        .args(["explain", "-c", "demo", "--sql", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"SELECT * FROM t")
+            .unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).to_ascii_uppercase().contains("SCAN"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cancels_the_statement_instead_of_killing_the_client() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+
+    // Long enough that the signal arrives while it is still running.
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_spanners"))
+        .arg("--home")
+        .arg(f.home())
+        .args([
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000000) SELECT i FROM n",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let killed = std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(killed.success());
+
+    let out = child.wait_with_output().expect("wait");
+    let err = stderr(&out);
+    // The client stayed alive, asked the server to stop, and said so.
+    assert!(err.contains("cancelling"), "{err}");
+    assert!(err.contains("cancelled"), "{err}");
+    assert!(!out.status.success());
+}

@@ -60,6 +60,9 @@ $S query -c live --sql "UPDATE users SET x = 1 WHERE id = 2" --unlock-writes liv
 $S saved add "top users" --sql "SELECT * FROM users ORDER BY score DESC LIMIT 20" --folder reports
 $S saved run "top users" -c local
 
+# Ctrl-C asks the server to stop the statement and drains the session, so the
+# connection is not left mid-stream. A second Ctrl-C exits immediately.
+
 $S history            # what you ran
 $S check -c live --sql "SELECT 1; DROP TABLE users"  # judges each statement; exit 2 = blocked
 ```

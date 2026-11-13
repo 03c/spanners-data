@@ -360,7 +360,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             .await
         }
         Command::History { limit, search } => history(&app, limit, search.as_deref()),
-        Command::Check { connection, sql } => check(&app, &connection, &sql).await,
+        Command::Check { connection, sql } => check(&app, &connection, &read_sql(&sql)?).await,
         Command::Schema {
             connection,
             table,
@@ -372,7 +372,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             sql,
             json,
             password,
-        } => explain(&mut app, &connection, &sql, json, password).await,
+        } => explain(&mut app, &connection, &read_sql(&sql)?, json, password).await,
         Command::Saved { action } => saved(&mut app, action).await,
     }
 }
@@ -848,8 +848,28 @@ async fn run_table(
     let mut printed: usize = 0;
     let mut error = None;
     let mut done = false;
+    let mut interrupted = false;
+    let query_id = run.query_id;
+    // Ctrl-C asks the server to stop and keeps draining, so the session is
+    // left clean rather than mid-stream. A second Ctrl-C (the future is
+    // disabled after the first) falls back to the default, which exits.
+    let mut sigint = Box::pin(tokio::signal::ctrl_c());
 
-    while let Some(event) = run.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = run.recv() => event,
+            result = &mut sigint, if !interrupted => {
+                interrupted = true;
+                if result.is_ok() {
+                    eprintln!("cancelling; press Ctrl-C again to quit immediately");
+                    if let Err(e) = app.cancel(id, query_id).await {
+                        eprintln!("could not cancel: {e}");
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(event) = event else { break };
         match event {
             QueryEvent::Meta { columns: c } => {
                 let columns: Vec<String> = c.into_iter().map(|c| c.name).collect();
@@ -861,6 +881,11 @@ async fn run_table(
                 }
             }
             QueryEvent::Batch { rows: batch, .. } => {
+                // After a cancel, rows already in flight are dropped rather
+                // than printed: the user asked for it to stop.
+                if interrupted {
+                    continue;
+                }
                 for row in &batch {
                     if let Some(cap) = cap {
                         if printed >= cap as usize {
@@ -888,10 +913,18 @@ async fn run_table(
                 done = true;
             }
             QueryEvent::Failed { message, code, .. } => {
-                error = Some(format!(
-                    "{message}{}",
-                    code.map(|c| format!(" [{c}]")).unwrap_or_default()
-                ));
+                // A user cancel is not an error worth a vendor code in the
+                // output; say plainly what happened.
+                error = Some(
+                    if code.as_deref() == Some(spanners_driver_api::codes::CANCELLED) {
+                        "cancelled".into()
+                    } else {
+                        format!(
+                            "{message}{}",
+                            code.map(|c| format!(" [{c}]")).unwrap_or_default()
+                        )
+                    },
+                );
             }
         }
     }
