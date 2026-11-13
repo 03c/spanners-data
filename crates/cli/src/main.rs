@@ -109,6 +109,12 @@ enum Command {
         /// Only entries containing this text.
         #[arg(long)]
         search: Option<String>,
+        /// Only entries for this connection (id or name).
+        #[arg(long, short)]
+        connection: Option<String>,
+        /// Delete all history. Saved queries are kept.
+        #[arg(long)]
+        clear: bool,
     },
     /// Classify a statement without running it.
     Check {
@@ -383,7 +389,12 @@ async fn run(cli: Cli) -> Result<(), String> {
             )
             .await
         }
-        Command::History { limit, search } => history(&app, limit, search.as_deref()),
+        Command::History {
+            limit,
+            search,
+            connection,
+            clear,
+        } => history(&app, limit, search.as_deref(), connection.as_deref(), clear),
         Command::Check { connection, sql } => check(&app, &connection, &read_sql(&sql)?).await,
         Command::Schema {
             connection,
@@ -1294,7 +1305,21 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn history(app: &App, limit: u32, search: Option<&str>) -> Result<(), String> {
+fn history(
+    app: &App,
+    limit: u32,
+    search: Option<&str>,
+    connection: Option<&str>,
+    clear: bool,
+) -> Result<(), String> {
+    if clear {
+        let removed = app.clear_history().map_err(|e| e.to_string())?;
+        eprintln!("cleared {removed} history entr{}", plural(removed));
+        return Ok(());
+    }
+    // Resolve first: a typo should say "no connection", not "no history".
+    let connection_id = connection.map(|c| resolve(app, c)).transpose()?;
+
     let entries = match search {
         Some(text) => app
             .search(text, limit)
@@ -1313,12 +1338,24 @@ fn history(app: &App, limit: u32, search: Option<&str>) -> Result<(), String> {
                     },
                 )
             })
+            .filter(|hit| match &connection_id {
+                Some(id) => hit.1.connection_id == *id,
+                None => true,
+            })
             .collect::<Vec<_>>(),
-        None => app.history(limit).map_err(|e| e.to_string())?,
+        None => app
+            .history_for(connection_id.as_deref(), limit)
+            .map_err(|e| e.to_string())?,
     };
 
     if entries.is_empty() {
-        println!("No history yet.");
+        // "No history yet" is wrong when there is history, just none of it
+        // matching what was asked for.
+        if search.is_some() || connection_id.is_some() {
+            println!("No history matches.");
+        } else {
+            println!("No history yet.");
+        }
         return Ok(());
     }
     for (_, entry) in entries {
@@ -1331,7 +1368,8 @@ fn history(app: &App, limit: u32, search: Option<&str>) -> Result<(), String> {
             .map(|c| c.name.as_str())
             .unwrap_or(entry.connection_id.as_str());
         println!(
-            "{name}\t{status}\t{}ms\t{}",
+            "{}\t{name}\t{status}\t{}ms\t{}",
+            age(entry.started_at),
             entry.duration_ms,
             oneline(&entry.sql)
         );
@@ -1585,6 +1623,32 @@ fn describe_ms(ms: u64) -> String {
         format!("{}s", ms / 1_000)
     } else {
         format!("{ms} ms")
+    }
+}
+
+/// How long ago, in the units a person uses when scanning a list. Relative
+/// rather than absolute because the store records UTC milliseconds and a
+/// timestamp in the wrong zone is worse than no timestamp.
+fn age(started_at_ms: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let secs = (now - started_at_ms).max(0) / 1000;
+    match secs {
+        0..=9 => "just now".into(),
+        10..=59 => format!("{secs}s ago"),
+        60..=3_599 => format!("{}m ago", secs / 60),
+        3_600..=86_399 => format!("{}h ago", secs / 3_600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 {
+        "y"
+    } else {
+        "ies"
     }
 }
 

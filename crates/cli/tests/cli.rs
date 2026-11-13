@@ -1648,3 +1648,73 @@ read_only = true
     assert!(text.contains("timeout       none"), "{text}");
     assert!(text.contains("ddl           allowed"), "{text}");
 }
+
+#[test]
+fn history_says_when_and_can_be_narrowed_to_one_connection() {
+    let f = Fixture::new();
+    let one = f.add("one", "local");
+    f.add("two", "local");
+    f.query("one", "SELECT 1 AS alpha");
+    f.query("two", "SELECT 2 AS beta");
+
+    let all = spanners(f.home(), &["history"]);
+    assert!(all.status.success(), "{}", stderr(&all));
+    let text = stdout(&all);
+    assert_eq!(text.lines().count(), 2, "{text}");
+    // A list without a time cannot answer "when did I run that".
+    assert!(text.starts_with("just now\t"), "{text}");
+
+    let narrowed = spanners(f.home(), &["history", "-c", "one"]);
+    assert!(narrowed.status.success(), "{}", stderr(&narrowed));
+    let text = stdout(&narrowed);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("alpha"), "{text}");
+    assert!(!text.contains("beta"), "{text}");
+
+    // Nothing matching is not the same as no history at all.
+    let none = spanners(f.home(), &["history", "-c", "one", "--search", "beta"]);
+    assert!(none.status.success(), "{}", stderr(&none));
+    assert_eq!(stdout(&none).trim(), "No history matches.");
+
+    // A typo names the connection, not the history.
+    let bad = spanners(f.home(), &["history", "-c", "nope"]);
+    assert!(!bad.status.success());
+    assert!(
+        stderr(&bad).contains("no connection matches"),
+        "{}",
+        stderr(&bad)
+    );
+
+    // The filter addresses the connection by id too.
+    let by_id = spanners(f.home(), &["history", "-c", &one]);
+    assert!(by_id.status.success(), "{}", stderr(&by_id));
+    assert_eq!(stdout(&by_id), text);
+}
+
+#[test]
+fn clearing_history_keeps_saved_queries() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "SELECT 1 AS alpha");
+    let saved = spanners(
+        f.home(),
+        &["saved", "add", "keep", "--sql", "SELECT 1", "-c", "demo"],
+    );
+    assert!(saved.status.success(), "{}", stderr(&saved));
+
+    let cleared = spanners(f.home(), &["history", "--clear"]);
+    assert!(cleared.status.success(), "{}", stderr(&cleared));
+    assert!(
+        stderr(&cleared).contains("cleared 1 history entry"),
+        "{}",
+        stderr(&cleared)
+    );
+
+    assert_eq!(
+        stdout(&spanners(f.home(), &["history"])).trim(),
+        "No history yet."
+    );
+    // A saved query was written on purpose; clearing history must not eat it.
+    let list = spanners(f.home(), &["saved", "list"]);
+    assert!(stdout(&list).contains("keep"), "{}", stdout(&list));
+}

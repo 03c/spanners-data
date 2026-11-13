@@ -19,7 +19,7 @@ the shell decision, which is the only remaining blocker.
 | MySQL driver | done: streaming, `KILL QUERY`, `max_execution_time`, caps |
 | App services (`spanners-app`) | done: connect, guarded run, cancel, schema, explain, export, history, saved queries |
 | CLI (`spanners`) | done: connections (add from URL, show the resolved rules, set-profile, test, import from DBeaver), query (single statement or a whole script), export, history, saved queries, check, schema, explain — same config, history and policy as the app |
-| History + saved queries | done: one SQLite file, shared search, 10k/90-day prune |
+| History + saved queries | done: one SQLite file, shared search, filter by connection, clear, 10k/90-day prune |
 | DBeaver import | done: `connections import` reads `data-sources.json`; never passwords; loopback = local, network = staging |
 | Export | done: streaming CSV and JSON Lines, cap-aware, backs clipboard copy |
 | Dialect keywords | done: per-driver lists for highlighting and autocomplete |
@@ -69,7 +69,7 @@ $S saved run "top users" -c local
 # Ctrl-C asks the server to stop the statement and drains the session, so the
 # connection is not left mid-stream. A second Ctrl-C exits immediately.
 
-$S history            # what you ran
+$S history -c live    # what you ran, on this connection, and when
 $S check -c live --sql "SELECT 1; DROP TABLE users"  # judges each statement; exit 2 = blocked
 ```
 

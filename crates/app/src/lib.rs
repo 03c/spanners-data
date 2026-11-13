@@ -943,8 +943,23 @@ impl App {
     // ---- history and saved queries -------------------------------------
 
     pub fn history(&self, limit: u32) -> Result<Vec<(i64, HistoryEntry)>> {
+        self.history_for(None, limit)
+    }
+
+    /// History, optionally narrowed to one connection.
+    pub fn history_for(
+        &self,
+        connection_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(i64, HistoryEntry)>> {
         let store = self.lock_store()?;
-        Ok(store.recent(limit)?)
+        Ok(store.recent_for(connection_id, limit)?)
+    }
+
+    /// Delete every history row. Saved queries survive.
+    pub fn clear_history(&self) -> Result<u64> {
+        let store = self.lock_store()?;
+        Ok(store.clear_history()?)
     }
 
     pub fn search(&self, text: &str, limit: u32) -> Result<Vec<SearchHit>> {

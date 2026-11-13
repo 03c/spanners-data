@@ -311,11 +311,23 @@ impl Store {
 
     /// Most recent first.
     pub fn recent(&self, limit: u32) -> Result<Vec<(i64, HistoryEntry)>> {
+        self.recent_for(None, limit)
+    }
+
+    /// Most recent first, optionally for one connection. A history you cannot
+    /// narrow to the database you are thinking about is a log, not a tool.
+    pub fn recent_for(
+        &self,
+        connection_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(i64, HistoryEntry)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, connection_id, sql, started_at, duration_ms, row_count, error
-             FROM history ORDER BY started_at DESC, id DESC LIMIT ?1",
+             FROM history
+             WHERE ?1 IS NULL OR connection_id = ?1
+             ORDER BY started_at DESC, id DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map([limit], |r| {
+        let rows = stmt.query_map(params![connection_id, limit], |r| {
             Ok((
                 r.get(0)?,
                 HistoryEntry {
@@ -329,6 +341,12 @@ impl Store {
             ))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Delete every history row, returning how many there were. Saved queries
+    /// are untouched: they were written on purpose.
+    pub fn clear_history(&self) -> Result<u64> {
+        Ok(self.conn.execute("DELETE FROM history", [])? as u64)
     }
 
     /// Drop rows beyond `max_rows` or older than `max_days`. Called after each
