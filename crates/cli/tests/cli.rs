@@ -585,3 +585,57 @@ fn explain_shows_a_plan_without_running_the_query() {
         stdout(&out)
     );
 }
+
+#[test]
+fn production_writes_need_the_name_typed() {
+    let f = Fixture::new();
+    f.add("seed", "local");
+    f.query("seed", "CREATE TABLE t (x INTEGER)");
+    f.add("live", "production");
+
+    // The production connection points at the same file; `add` uses the same
+    // database path for every local fixture.
+    let refused = f.query("live", "INSERT INTO t VALUES (1)");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("read-only"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let wrong = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "live",
+            "--sql",
+            "INSERT INTO t VALUES (1)",
+            "--unlock-writes",
+            "Live",
+        ],
+    );
+    assert!(!wrong.status.success());
+    assert!(
+        stderr(&wrong).contains("does not match the connection name"),
+        "{}",
+        stderr(&wrong)
+    );
+
+    let allowed = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "live",
+            "--sql",
+            "INSERT INTO t VALUES (1)",
+            "--unlock-writes",
+            "live",
+        ],
+    );
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+
+    let count = f.query("seed", "SELECT count(*) FROM t");
+    assert!(stdout(&count).contains('1'), "{}", stdout(&count));
+}

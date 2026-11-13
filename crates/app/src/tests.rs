@@ -738,3 +738,173 @@ async fn completion_uses_the_cached_schema_and_survives_ddl() {
     let after_drop = app.complete(&id, sql, 7).unwrap();
     assert!(!after_drop.iter().any(|c| c.text == "name"));
 }
+
+/// A production connection to a file that already has a table, so the
+/// read-only open has something to read.
+async fn production_app(dir: &TempDir) -> (App, String) {
+    let seed = local_sqlite(dir);
+    let path = seed.database.clone().unwrap();
+    let mut app = app_with(dir).await;
+    app.upsert_connection(seed.clone()).unwrap();
+    app.connect(&seed.id, None).await.unwrap();
+    let mut run = match app
+        .run(&seed.id, "CREATE TABLE t (x int)", false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+    app.disconnect(&seed.id).await.unwrap();
+
+    let mut conn = Connection::new("live", "sqlite", Profile::Production);
+    conn.database = Some(path);
+    let id = conn.id.clone();
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+    (app, id)
+}
+
+#[tokio::test]
+async fn a_production_write_is_blocked_until_the_name_is_typed() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (1)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+
+    // The wrong text does nothing, and the error says why.
+    let err = app.unlock_writes(&id, "Live").await.unwrap_err();
+    assert!(matches!(err, AppError::ConfirmationMismatch), "{err:?}");
+    assert!(app.session_info(&id).unwrap().read_only);
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (1)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+
+    let info = app.unlock_writes(&id, "live").await.unwrap();
+    assert!(!info.read_only);
+    assert!(app.unlock_remaining(&id).is_some());
+
+    let mut run = match app
+        .run(&id, "INSERT INTO t VALUES (1)", false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+    assert_eq!(row_count(&mut app, &id, "SELECT x FROM t").await, 1);
+}
+
+#[tokio::test]
+async fn an_unlock_does_not_lift_the_other_production_rules() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+    app.unlock_writes(&id, "live").await.unwrap();
+
+    // DDL stays blocked: an unlock is for data, not for schema changes.
+    match app.run(&id, "DROP TABLE t", false).await.unwrap() {
+        RunOutcome::Blocked { reasons } => assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, spanners_core::Violation::Ddl)),
+            "{reasons:?}"
+        ),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+
+    // A write without a WHERE still asks.
+    assert!(matches!(
+        app.run(&id, "UPDATE t SET x = 2", false).await.unwrap(),
+        RunOutcome::NeedsConfirmation { .. }
+    ));
+
+    // The row cap is unchanged by the unlock.
+    assert_eq!(app.session_info(&id).unwrap().max_rows, Some(200));
+}
+
+#[tokio::test]
+async fn an_unlock_can_be_taken_back() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+    app.unlock_writes(&id, "live").await.unwrap();
+    let info = app.lock_writes(&id).await.unwrap();
+    assert!(info.read_only);
+    assert!(app.unlock_remaining(&id).is_none());
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (1)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+}
+
+#[tokio::test]
+async fn an_unlock_expires_after_its_idle_window() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+    app.set_unlock_idle(Duration::from_millis(30));
+    app.unlock_writes(&id, "live").await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // The next statement re-locks before judging, so it is refused.
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (1)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+    assert!(app.session_info(&id).unwrap().read_only);
+    assert!(app.unlock_remaining(&id).is_none());
+}
+
+#[tokio::test]
+async fn using_an_unlock_keeps_it_alive() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+    app.set_unlock_idle(Duration::from_millis(500));
+    app.unlock_writes(&id, "live").await.unwrap();
+
+    // Three statements across more than one window, each well inside it.
+    for i in 0..3 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut run = match app
+            .run(&id, &format!("INSERT INTO t VALUES ({i})"), false)
+            .await
+            .unwrap()
+        {
+            RunOutcome::Running(run) => run,
+            other => panic!("expected to run, got {other:?}"),
+        };
+        drain(&mut run).await;
+    }
+    assert_eq!(row_count(&mut app, &id, "SELECT x FROM t").await, 3);
+}
+
+#[tokio::test]
+async fn judging_reflects_an_unlock_without_running_anything() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+
+    assert!(matches!(
+        app.judge(&id, "INSERT INTO t VALUES (1)").await.unwrap(),
+        spanners_core::Verdict::Block { .. }
+    ));
+
+    app.unlock_writes(&id, "live").await.unwrap();
+    // The targeted insert is allowed; the unlock lifted only read-only.
+    assert_eq!(
+        app.judge(&id, "INSERT INTO t VALUES (1)").await.unwrap(),
+        spanners_core::Verdict::Allow
+    );
+}

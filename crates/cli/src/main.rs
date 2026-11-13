@@ -64,6 +64,10 @@ enum Command {
         /// for writes on a staging connection.
         #[arg(long)]
         transaction: bool,
+        /// Lift the read-only lock on a production connection for this run.
+        /// Pass the connection's name, exactly, as confirmation.
+        #[arg(long, value_name = "CONNECTION_NAME")]
+        unlock_writes: Option<String>,
     },
     /// Stream a query straight to a file, honouring the profile's caps.
     Export {
@@ -213,6 +217,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             max_rows,
             statement,
             transaction,
+            unlock_writes,
         } => {
             query(
                 &mut app,
@@ -225,6 +230,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     max_rows,
                     statement,
                     transaction,
+                    unlock_writes,
                 },
             )
             .await
@@ -381,6 +387,7 @@ struct QueryArgs {
     max_rows: Option<u32>,
     statement: Option<usize>,
     transaction: bool,
+    unlock_writes: Option<String>,
 }
 
 async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
@@ -393,11 +400,19 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         max_rows,
         statement,
         transaction,
+        unlock_writes,
     } = args;
     let id = resolve(app, &connection)?;
     app.connect(&id, password)
         .await
         .map_err(|e| e.to_string())?;
+
+    if let Some(confirmation) = unlock_writes {
+        app.unlock_writes(&id, &confirmation)
+            .await
+            .map_err(|e| e.to_string())?;
+        eprintln!("writes unlocked for this run");
+    }
     let sql = match statement {
         Some(n) => pick_statement(app, &id, &sql, n)?,
         None => sql,

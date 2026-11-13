@@ -10,7 +10,7 @@ pub mod secrets;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use spanners_core::config::{redact_dsn, AppConfig, ConfigError, ConfigStore, Connection};
 use spanners_core::export::{self, Buffer, ExportOpts, ExportSummary};
@@ -59,6 +59,12 @@ pub enum AppError {
     NeedsConfirmation {
         reasons: Vec<spanners_core::Violation>,
     },
+    /// `unlock_writes` was given the wrong confirmation text.
+    #[error("that does not match the connection name; writes stay locked")]
+    ConfirmationMismatch,
+    /// `unlock_writes` on a connection that is not read-only.
+    #[error("this connection already allows writes")]
+    WritesAlreadyAllowed,
     #[error("{0}")]
     Io(String),
 }
@@ -80,6 +86,9 @@ struct Live {
     session: Box<dyn Session>,
     policy: Policy,
     info: SessionInfo,
+    /// When an explicit write unlock expires. `None` means writes are locked
+    /// (or the profile never locked them in the first place).
+    unlock_until: Option<Instant>,
     /// Cached schema, used for autocomplete. Fetched on demand rather than at
     /// connect time, because a schema query costs a round trip the user did
     /// not ask for, and a connection that is never queried needs no schema.
@@ -162,6 +171,11 @@ impl Drop for Run {
     }
 }
 
+/// A production write unlock expires after this much idle time. Long enough to
+/// do a careful repair, short enough that a forgotten unlock is not a standing
+/// invitation.
+const DEFAULT_UNLOCK_IDLE: Duration = Duration::from_secs(15 * 60);
+
 pub struct App {
     config_path: ConfigStore,
     config: AppConfig,
@@ -169,6 +183,8 @@ pub struct App {
     history: Arc<Mutex<Store>>,
     secrets: Box<dyn Secrets>,
     live: HashMap<String, Live>,
+    /// How long an explicit production write unlock survives without use.
+    unlock_idle: Duration,
 }
 
 impl App {
@@ -185,6 +201,7 @@ impl App {
             history: Arc::new(Mutex::new(history)),
             secrets: default_secrets(),
             live: HashMap::new(),
+            unlock_idle: DEFAULT_UNLOCK_IDLE,
         })
     }
 
@@ -237,6 +254,10 @@ impl App {
         // server keeps refusing writes the new policy would allow.
         if let Some(live) = self.live.get_mut(&connection.id) {
             live.policy = connection.policy();
+            // Editing the connection revokes an explicit unlock: the user has
+            // just restated what this connection is, and the old consent was
+            // given for the old profile.
+            live.unlock_until = None;
         }
         Ok(())
     }
@@ -275,7 +296,20 @@ impl App {
         if let Some(live) = self.live.get(id) {
             return Ok(live.info.clone());
         }
+        self.open_session(id, password, None).await
+    }
 
+    /// Open a session, optionally overriding the profile's read-only setting.
+    ///
+    /// `read_only` is `None` for a normal connect, `Some(false)` for an
+    /// explicit production unlock, and `Some(true)` when re-locking. The
+    /// override never changes the saved connection: it lives on this session.
+    async fn open_session(
+        &mut self,
+        id: &str,
+        password: Option<String>,
+        read_only: Option<bool>,
+    ) -> Result<SessionInfo> {
         let connection = self
             .connection(id)
             .ok_or_else(|| AppError::UnknownConnection(id.into()))?
@@ -298,14 +332,16 @@ impl App {
             return Err(AppError::PasswordRequired { id: id.into() });
         }
 
-        let policy = connection.policy();
+        let mut policy = connection.policy();
+        let read_only = read_only.unwrap_or(policy.read_only);
+        policy.read_only = read_only;
         let dialect = connection.dialect().unwrap_or_else(|| driver.dialect());
 
         let session = driver
             .connect(
                 &connection.to_conn_config(password),
                 SessionOpts {
-                    read_only: policy.read_only,
+                    read_only,
                     timeout: policy.timeout,
                 },
             )
@@ -316,7 +352,7 @@ impl App {
             driver: connection.driver.clone(),
             dialect,
             server_version: session.server_version().to_string(),
-            read_only: policy.read_only,
+            read_only,
             max_rows: policy.max_rows,
         };
 
@@ -326,10 +362,105 @@ impl App {
                 session,
                 policy,
                 info: info.clone(),
+                unlock_until: None,
                 schema: None,
             },
         );
         Ok(info)
+    }
+
+    /// Reopen a session with a different read-only setting.
+    ///
+    /// This drops the current session, so an open transaction is rolled back.
+    /// That is deliberate: changing the write mode mid-transaction would let a
+    /// half-finished unit of work straddle the boundary.
+    async fn reopen(&mut self, id: &str, read_only: bool) -> Result<SessionInfo> {
+        if let Some(live) = self.live.remove(id) {
+            live.session.close().await?;
+        }
+        self.open_session(id, None, Some(read_only)).await
+    }
+
+    /// Lift the read-only lock on a production connection for this session.
+    ///
+    /// `confirmation` must be the connection's name, exactly: the point is to
+    /// make the user read what they are unlocking. The unlock is not saved and
+    /// expires after `unlock_idle` without a statement. Everything else the
+    /// profile enforces still applies — DDL stays blocked and a write without a
+    /// `WHERE` still asks for confirmation.
+    pub async fn unlock_writes(&mut self, id: &str, confirmation: &str) -> Result<SessionInfo> {
+        let connection = self
+            .connection(id)
+            .ok_or_else(|| AppError::UnknownConnection(id.into()))?;
+        if !connection.policy().read_only {
+            return Err(AppError::WritesAlreadyAllowed);
+        }
+        if confirmation.trim() != connection.name {
+            return Err(AppError::ConfirmationMismatch);
+        }
+        if !self.is_connected(id) {
+            return Err(AppError::NotConnected(id.into()));
+        }
+
+        let info = self.reopen(id, false).await?;
+        if let Some(live) = self.live.get_mut(id) {
+            live.unlock_until = Some(Instant::now() + self.unlock_idle);
+        }
+        Ok(info)
+    }
+
+    /// Put the read-only lock back, closing and reopening the session.
+    pub async fn lock_writes(&mut self, id: &str) -> Result<SessionInfo> {
+        let locked_by_profile = self
+            .connection(id)
+            .ok_or_else(|| AppError::UnknownConnection(id.into()))?
+            .policy()
+            .read_only;
+        if !locked_by_profile {
+            return Err(AppError::WritesAlreadyAllowed);
+        }
+        if !self.is_connected(id) {
+            return Err(AppError::NotConnected(id.into()));
+        }
+        self.reopen(id, true).await
+    }
+
+    /// How long the current write unlock has left; `None` when writes are
+    /// locked.
+    pub fn unlock_remaining(&self, id: &str) -> Option<Duration> {
+        let until = self.live.get(id)?.unlock_until?;
+        Some(until.saturating_duration_since(Instant::now()))
+    }
+
+    /// Change how long an unlock survives. Exposed for tests and for a future
+    /// preference; the default is 15 minutes.
+    pub fn set_unlock_idle(&mut self, idle: Duration) {
+        self.unlock_idle = idle;
+    }
+
+    /// Re-lock if the unlock has expired. Called before every statement, so an
+    /// abandoned unlock cannot outlive its window just because no timer fired.
+    /// Extend an active unlock, so the window measures idle time rather than
+    /// total time.
+    fn touch_unlock(&mut self, id: &str) {
+        let idle = self.unlock_idle;
+        if let Some(live) = self.live.get_mut(id) {
+            if live.unlock_until.is_some() {
+                live.unlock_until = Some(Instant::now() + idle);
+            }
+        }
+    }
+
+    async fn expire_unlock(&mut self, id: &str) -> Result<()> {
+        let expired = self
+            .live
+            .get(id)
+            .and_then(|live| live.unlock_until)
+            .is_some_and(|until| until <= Instant::now());
+        if expired {
+            self.reopen(id, true).await?;
+        }
+        Ok(())
     }
 
     /// Try a connection without adopting it: the "Test" button in the
@@ -443,13 +574,27 @@ impl App {
             .dialect()
             .or_else(|| self.session_info(id).map(|i| i.dialect))
             .unwrap_or(Dialect::Postgres);
+
         // A connection that is not open is judged as if no transaction were
         // open, which is the conservative answer for the staging profile.
-        let in_transaction = match self.live.get(id) {
-            Some(live) => live.session.in_transaction().await,
-            None => false,
+        // A live session is judged with *its* policy: an unlocked production
+        // session must not be reported as read-only.
+        let (mut policy, in_transaction) = match self.live.get(id) {
+            Some(live) => (live.policy.clone(), live.session.in_transaction().await),
+            None => (connection.policy(), false),
         };
-        Ok(connection.policy().judge_in(sql, dialect, in_transaction))
+        // Judging cannot reopen the session, so an expired unlock is treated
+        // as locked here and actually re-locked by the next `run`.
+        if !policy.read_only
+            && self
+                .live
+                .get(id)
+                .and_then(|live| live.unlock_until)
+                .is_some_and(|until| until <= Instant::now())
+        {
+            policy.read_only = true;
+        }
+        Ok(policy.judge_in(sql, dialect, in_transaction))
     }
 
     /// Run one buffer through the policy gate.
@@ -457,6 +602,10 @@ impl App {
     /// `confirmed` must come from the user accepting a confirmation for this
     /// exact SQL; never default it to `true`.
     pub async fn run(&mut self, id: &str, sql: &str, confirmed: bool) -> Result<RunOutcome> {
+        if !self.is_connected(id) {
+            return Err(AppError::NotConnected(id.into()));
+        }
+        self.expire_unlock(id).await?;
         let live = self
             .live
             .get(id)
@@ -501,6 +650,10 @@ impl App {
             if let Some(live) = self.live.get_mut(id) {
                 live.schema = None;
             }
+        }
+        // Any statement counts as activity for the unlock window.
+        if matches!(outcome, RunOutcome::Running(_)) {
+            self.touch_unlock(id);
         }
         Ok(outcome)
     }
@@ -646,6 +799,10 @@ impl App {
         confirmed: bool,
         out: &mut W,
     ) -> Result<ExportSummary> {
+        if !self.is_connected(id) {
+            return Err(AppError::NotConnected(id.into()));
+        }
+        self.expire_unlock(id).await?;
         let live = self
             .live
             .get(id)
@@ -678,6 +835,7 @@ impl App {
 
         // An export is still a query the user ran; it belongs in history.
         self.record(id, sql, started_at, elapsed, Some(summary.rows), None);
+        self.touch_unlock(id);
         Ok(summary)
     }
 

@@ -13,6 +13,7 @@ the shell decision, which is the only remaining blocker.
 | --- | --- |
 | Driver boundary (`Driver`/`Session`) | done, object-safe, serde-friendly |
 | Safety policy (Local/Staging/Production) | done: presets, overrides, classification, guarded execution |
+| Production write unlock | done: name confirmation, 15-minute idle expiry, re-locks on disconnect or expiry |
 | SQLite driver | done: streaming, cancel, timeouts, row caps, read-only |
 | Postgres driver | done: streaming, `pg_cancel_backend`, statement timeout, caps |
 | MySQL driver | done: streaming, `KILL QUERY`, `max_execution_time`, caps |

@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections, query (table/csv/jsonl), export, history, check, schema, explain; same config, history and policy as the app |
-| Tests | 196: 99 core, 31 app, 3 app end-to-end against real servers, 24 CLI (21 process-level), 17 driver integration, 22 driver unit/registry |
+| Tests | 203: 99 core, 37 app, 3 app end-to-end against real servers, 25 CLI (22 process-level), 17 driver integration, 22 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -290,7 +290,10 @@ Presets (per connection, overridable):
 
 Production writes require an explicit **"Unlock writes for this session"**
 action, confirmed by typing the connection name; the unlock auto-expires after
-15 minutes idle, on tab close, and on disconnect. Read-only is enforced by the
+15 minutes idle, on tab close, and on disconnect. It is not saved, and it only
+lifts read-only: DDL stays blocked, an `UPDATE` without `WHERE` still asks, and
+the row cap is unchanged. Unlocking reopens the session, so an open transaction
+is rolled back rather than straddling the change. Read-only is enforced by the
 server, so even a bug in our classifier cannot write.
 
 `COMMIT` is never implicit on staging or production. Closing a tab or
