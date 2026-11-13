@@ -174,8 +174,10 @@ enum SavedAction {
     Run {
         /// Id from `saved list`, or a unique name.
         key: String,
+        /// Connection id or name. Defaults to the one the query was saved
+        /// against, when it recorded one.
         #[arg(long, short)]
-        connection: String,
+        connection: Option<String>,
         #[arg(long, value_enum, default_value_t = Output::Table)]
         format: Output,
         #[arg(long)]
@@ -190,6 +192,19 @@ enum SavedAction {
         unlock_writes: Option<String>,
         #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
         password: Option<String>,
+    },
+    /// Change a saved query's name, SQL, or folder.
+    #[command(alias = "update")]
+    Edit {
+        /// Id from `saved list`, or a unique name.
+        key: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, short)]
+        sql: Option<String>,
+        /// Move it into this top-level folder; created if missing.
+        #[arg(long)]
+        folder: Option<String>,
     },
     /// Delete a saved query.
     #[command(alias = "rm")]
@@ -434,9 +449,18 @@ async fn saved(app: &mut App, action: SavedAction) -> Result<(), String> {
             unlock_writes,
             password,
         } => {
-            let sql = {
+            let (sql, saved_connection) = {
                 let library = app.library().map_err(|e| e.to_string())?;
-                library.find(&key)?.body.clone()
+                let query = library.find(&key)?;
+                (query.body.clone(), query.connection_id.clone())
+            };
+            let connection = match connection.or(saved_connection) {
+                Some(connection) => connection,
+                None => {
+                    return Err(format!(
+                        "'{key}' was not saved against a connection; pass --connection"
+                    ))
+                }
             };
             query(
                 app,
@@ -454,6 +478,34 @@ async fn saved(app: &mut App, action: SavedAction) -> Result<(), String> {
                 },
             )
             .await
+        }
+        SavedAction::Edit {
+            key,
+            name,
+            sql,
+            folder,
+        } => {
+            let (id, current) = {
+                let library = app.library().map_err(|e| e.to_string())?;
+                let query = library.find(&key)?;
+                (query.id, query.clone())
+            };
+            let body = match sql {
+                Some(sql) => read_sql(&sql)?,
+                None => current.body.clone(),
+            };
+            let new_name = name.unwrap_or_else(|| current.name.clone());
+            if body != current.body || new_name != current.name {
+                app.update_query(id, &new_name, &body)
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(folder) = folder {
+                let folder_id = folder_id(app, &folder)?;
+                app.move_query(id, Some(folder_id))
+                    .map_err(|e| e.to_string())?;
+            }
+            println!("{id}");
+            Ok(())
         }
         SavedAction::Remove { key } => {
             let id = {

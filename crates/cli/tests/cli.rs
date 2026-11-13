@@ -1339,3 +1339,78 @@ fn a_missing_password_says_how_to_supply_it() {
     assert!(err.contains("needs a password"), "{err}");
     assert!(err.contains("SPANNERS_PASSWORD"), "{err}");
 }
+
+#[test]
+fn a_saved_query_remembers_its_connection_and_can_be_edited() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+
+    let added = spanners(
+        f.home(),
+        &[
+            "saved",
+            "add",
+            "count",
+            "--sql",
+            "SELECT 1 AS n",
+            "-c",
+            "demo",
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+    let id = stdout(&added).trim().to_string();
+
+    // No -c: the connection it was saved against is used.
+    let run = spanners(f.home(), &["saved", "run", "count"]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(stdout(&run).contains('1'), "{}", stdout(&run));
+
+    let edited = spanners(
+        f.home(),
+        &[
+            "saved",
+            "edit",
+            &id,
+            "--name",
+            "row count",
+            "--sql",
+            "SELECT 2 AS n",
+            "--folder",
+            "reports",
+        ],
+    );
+    assert!(edited.status.success(), "{}", stderr(&edited));
+
+    let list = spanners(f.home(), &["saved", "list"]);
+    assert!(
+        stdout(&list).contains("reports\trow count"),
+        "{}",
+        stdout(&list)
+    );
+    let show = spanners(f.home(), &["saved", "show", "row count"]);
+    assert_eq!(stdout(&show).trim(), "SELECT 2 AS n");
+
+    let run = spanners(f.home(), &["saved", "run", "row count"]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(stdout(&run).contains('2'), "{}", stdout(&run));
+}
+
+#[test]
+fn a_saved_query_without_a_connection_says_what_to_pass() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    let added = spanners(f.home(), &["saved", "add", "loose", "--sql", "SELECT 1"]);
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let run = spanners(f.home(), &["saved", "run", "loose"]);
+    assert!(!run.status.success());
+    assert!(
+        stderr(&run).contains("pass --connection"),
+        "{}",
+        stderr(&run)
+    );
+
+    // Supplying one works.
+    let run = spanners(f.home(), &["saved", "run", "loose", "-c", "demo"]);
+    assert!(run.status.success(), "{}", stderr(&run));
+}
