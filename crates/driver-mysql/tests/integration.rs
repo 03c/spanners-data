@@ -304,6 +304,38 @@ async fn statement_timeout_reports_timed_out() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_per_statement_timeout_does_not_leak_into_the_next_statement() {
+    let Some(s) = session(false).await else {
+        return;
+    };
+
+    let timed = run(
+        &s,
+        "SELECT COUNT(*) FROM information_schema.columns a, information_schema.columns b",
+        ExecOpts {
+            timeout: Some(Duration::from_millis(300)),
+            ..ExecOpts::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        timed.failed.map(|(_, code)| code),
+        Some(Some(codes::TIMEOUT.to_string()))
+    );
+
+    // The session default is no deadline. If the 300 ms override leaked, this
+    // would be killed early.
+    let started = Instant::now();
+    let after = run(&s, "SELECT SLEEP(1)", ExecOpts::default()).await;
+    assert!(after.failed.is_none(), "{:?}", after.failed);
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "second statement did not sleep: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_only_session_rejects_writes() {
     let Some(s) = session(true).await else { return };
     let table = unique("spanners_ro");

@@ -174,7 +174,19 @@ impl Session for PostgresSession {
         let conn = Arc::clone(&self.conn);
         let sql = sql.to_owned();
         let max_rows = opts.max_rows;
-        let timeout = opts.timeout.or(self.default_timeout);
+        // `None` means "the session default applies", never "remove the
+        // profile's deadline" — otherwise passing no timeout would silently
+        // disable a production connection's 15s limit. `connect` already
+        // applied the default, so only a different value needs a round trip.
+        let effective = opts.timeout.or(self.default_timeout);
+        let timeout = if effective == self.default_timeout {
+            Timeout::Keep
+        } else {
+            Timeout::Set {
+                value: effective,
+                session_default: self.default_timeout,
+            }
+        };
         let canceller = Canceller {
             opts: self.opts.clone(),
             pid: self.pid,
@@ -325,23 +337,41 @@ async fn cancel_backend(opts: &PgConnectOptions, pid: i32) -> std::result::Resul
 struct Job<'a> {
     sql: &'a str,
     max_rows: Option<u32>,
-    timeout: Option<Duration>,
+    timeout: Timeout,
     in_txn: bool,
     cancelled: &'a AtomicBool,
     events: &'a mpsc::Sender<QueryEvent>,
     canceller: &'a Canceller,
 }
 
+/// `statement_timeout` is a session setting, so a per-statement override would
+/// otherwise leak into every later statement on the connection — including
+/// lengthening a deadline past what the profile allows.
+#[derive(Debug, Clone, Copy)]
+enum Timeout {
+    /// `connect` already applied the session default; nothing to do.
+    Keep,
+    /// Apply for this statement, then restore `session_default`.
+    Set {
+        value: Option<Duration>,
+        session_default: Option<Duration>,
+    },
+}
+
+impl Timeout {
+    fn wants_change(self) -> bool {
+        !matches!(self, Timeout::Keep)
+    }
+}
+
 async fn run(conn: &mut PgConnection, job: &Job<'_>) {
     let started = Instant::now();
 
-    if let Some(t) = job.timeout {
-        let ms = t.as_millis().max(1);
-        if let Err(e) = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
-            .bind(ms.to_string())
-            .execute(&mut *conn)
-            .await
-        {
+    if job.timeout.wants_change() {
+        let Timeout::Set { value, .. } = job.timeout else {
+            unreachable!("wants_change is true only for Set")
+        };
+        if let Err(e) = set_timeout(conn, value).await {
             let _ = job
                 .events
                 .send(QueryEvent::Failed {
@@ -354,20 +384,37 @@ async fn run(conn: &mut PgConnection, job: &Job<'_>) {
         }
     }
 
-    match stream(conn, job, started).await {
-        Ok(()) => {}
-        Err(e) => {
-            let code = classify(&e, job.cancelled.load(Ordering::SeqCst));
-            let _ = job
-                .events
-                .send(QueryEvent::Failed {
-                    message: e.to_string(),
-                    code,
-                    position: None,
-                })
-                .await;
-        }
+    let outcome = stream(conn, job, started).await;
+
+    // Restore even after a failure or a cancel: the next statement must start
+    // from the profile's deadline, not this statement's.
+    if let Timeout::Set {
+        session_default, ..
+    } = job.timeout
+    {
+        let _ = set_timeout(conn, session_default).await;
     }
+
+    if let Err(e) = outcome {
+        let code = classify(&e, job.cancelled.load(Ordering::SeqCst));
+        let _ = job
+            .events
+            .send(QueryEvent::Failed {
+                message: e.to_string(),
+                code,
+                position: None,
+            })
+            .await;
+    }
+}
+
+async fn set_timeout(conn: &mut PgConnection, timeout: Option<Duration>) -> sqlx::Result<()> {
+    let ms = timeout.map(|t| t.as_millis().max(1)).unwrap_or(0);
+    sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+        .bind(ms.to_string())
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
 }
 
 /// `57014` covers both "user cancelled" and "statement_timeout", so the cancel

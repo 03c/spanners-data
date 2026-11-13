@@ -70,7 +70,10 @@ pub struct QueryId(pub u64);
 pub struct ExecOpts {
     /// Stop fetching after this many rows. `None` means no cap.
     pub max_rows: Option<u32>,
-    /// Server-side or client-side deadline. `None` means no deadline.
+    /// Server-side or client-side deadline for this statement. `None` means
+    /// the session default applies (which may itself be no deadline). It never
+    /// means "remove the deadline": a profile's limit cannot be lifted by
+    /// omitting a field.
     pub timeout: Option<Duration>,
     /// The session is already read-only; drivers may assert this too.
     pub read_only: bool,

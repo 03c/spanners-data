@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use spanners_driver_api::{
-    ConnConfig, Driver, ExecOpts, QueryEvent, SchemaSnapshot, Session, SessionOpts, Value,
+    codes, ConnConfig, Driver, ExecOpts, QueryEvent, SchemaSnapshot, Session, SessionOpts, Value,
 };
 use spanners_driver_postgres::PostgresDriver;
 use tokio::sync::mpsc;
@@ -265,6 +265,38 @@ async fn cancel_reaches_the_server() {
 
     assert_eq!(code.as_deref(), Some("CANCELLED"));
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_per_statement_timeout_does_not_leak_into_the_next_statement() {
+    let Some(s) = session(false).await else {
+        return;
+    };
+
+    let timed = run(
+        &s,
+        "SELECT pg_sleep(5)",
+        ExecOpts {
+            timeout: Some(Duration::from_millis(300)),
+            ..ExecOpts::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        timed.failed.map(|(_, code)| code),
+        Some(Some(codes::TIMEOUT.to_string()))
+    );
+
+    // The session default is no deadline. If the 300 ms override leaked, this
+    // second statement would be killed early.
+    let started = Instant::now();
+    let after = run(&s, "SELECT pg_sleep(1)", ExecOpts::default()).await;
+    assert!(after.failed.is_none(), "{:?}", after.failed);
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "second statement did not sleep: {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
