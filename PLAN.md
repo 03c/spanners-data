@@ -7,13 +7,15 @@ Plan of record. Status: draft for review.
 | Item | State |
 | --- | --- |
 | `spanners-driver-api` | Driver/Session traits, lossless `Value`, streamed `QueryEvent` |
-| `spanners-core` | policy presets + overrides, SQL classification, `execute_guarded` gate, config store |
+| `spanners-core` | policy presets + overrides, SQL classification, `execute_guarded` gate, config store, history + saved-query store, streaming CSV/JSONL export |
 | `spanners-driver-sqlite` | streaming, interrupt cancel, timeout, fetch-stop caps, read-only |
-| `spanners-registry` | compile-time driver registry (`sqlite`) |
-| Tests | 36, green on Linux and Windows |
+| `spanners-driver-postgres` | streaming, `pg_cancel_backend` cancel, `statement_timeout`, fetch-stop caps with bounded resync, schema, `EXPLAIN (FORMAT JSON)` |
+| `spanners-driver-mysql` | streaming, `KILL QUERY` cancel, `max_execution_time`, fetch-stop caps with bounded resync, schema, `EXPLAIN FORMAT=JSON` |
+| `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
+| Tests | 79: 47 core (policy/classification/history/export), 15 driver integration against real servers, 17 driver unit |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
-| Postgres / MySQL | not started (M2) |
-| CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest |
+| CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; dedicated Postgres+MySQL service-container job |
+| UI | not started — blocked on the shell decision (M-1) |
 | Shell | undecided — M-1 measurements pending on your machines |
 
 

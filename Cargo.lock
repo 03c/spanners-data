@@ -1294,6 +1294,7 @@ name = "spanners-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "rusqlite",
  "serde",
  "serde_json",
  "spanners-driver-api",

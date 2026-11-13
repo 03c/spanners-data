@@ -33,6 +33,56 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  drivers:
+    name: driver integration (Linux)
+    # The driver suites are env-gated, so they pass without a server. This job
+    # is what actually exercises streaming, cancellation, row caps and
+    # server-enforced read-only against real Postgres and MySQL.
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pass
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: pass
+          MYSQL_DATABASE: spanners
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ppass --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SPANNERS_TEST_POSTGRES: postgres://postgres:pass@127.0.0.1:55432/postgres
+      SPANNERS_TEST_MYSQL: mysql://root:pass@127.0.0.1:53306/spanners
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: driver integration tests
+        run: |
+          set -o pipefail
+          # One thread per test: the suites create and drop pid-named tables and
+          # serialising keeps failure output readable. `--nocapture` also lets
+          # the skip check below see the drivers' own messages.
+          cargo test -p spanners-driver-postgres -- --test-threads=1 --nocapture 2>&1 | tee /tmp/pg.log
+          cargo test -p spanners-driver-mysql -- --test-threads=1 --nocapture 2>&1 | tee /tmp/mysql.log
+          # A typo in the service env would make every test print "skipped" and
+          # pass, which is worse than red.
+          if grep -q "skipped: SPANNERS_TEST" /tmp/pg.log /tmp/mysql.log; then
+            echo "::error::driver tests skipped — the service URLs are not set"
+            exit 1
+          fi
+
   spike-egui:
     name: spike-egui (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

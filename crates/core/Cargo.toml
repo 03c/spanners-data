@@ -10,13 +10,14 @@ repository.workspace = true
 [dependencies]
 spanners-driver-api.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 sqlparser = { version = "0.64", features = ["visitor"] }
 toml = "1.2"
 directories = "6.0"
+rusqlite = { version = "0.39", features = ["bundled", "hooks", "column_decltype"] }
 
 [dev-dependencies]
 spanners-driver-sqlite.workspace = true
 tempfile = "3.27"
-serde_json.workspace = true
