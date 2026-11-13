@@ -1000,6 +1000,12 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
     };
     let out = out.as_str();
 
+    if format == Output::Table {
+        return Err(
+            "export writes csv or jsonl; use `spanners query` for a table on stdout".into(),
+        );
+    }
+
     if transaction {
         app.begin(&id).await.map_err(|e| e.to_string())?;
     }
@@ -1017,7 +1023,10 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
     };
 
     if out == "-" {
-        let mut buf = spanners_core::export::Buffer::new();
+        // Stream, do not buffer: an export to stdout is the one case where the
+        // result may be as large as the terminal is patient for, and holding
+        // it in memory would defeat the row cap's purpose.
+        let mut stdout = tokio::io::stdout();
         let summary = match app
             .export_with_exec(
                 &id,
@@ -1028,7 +1037,7 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
                 },
                 &opts,
                 yes,
-                &mut buf,
+                &mut stdout,
             )
             .await
         {
@@ -1043,8 +1052,10 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
         if transaction {
             app.commit(&id).await.map_err(|e| e.to_string())?;
         }
-        let text = buf.into_string().map_err(|e| e.to_string())?;
-        print!("{text}");
+        stdout
+            .flush()
+            .await
+            .map_err(|e| format!("could not write stdout: {e}"))?;
         eprintln!(
             "{} row(s){}",
             summary.rows,

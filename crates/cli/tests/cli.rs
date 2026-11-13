@@ -1251,3 +1251,58 @@ fn ctrl_c_cancels_the_statement_instead_of_killing_the_client() {
     assert!(err.contains("cancelled"), "{err}");
     assert!(!out.status.success());
 }
+
+#[test]
+fn export_to_stdout_streams_the_same_csv_as_a_file() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+    f.query("demo", "INSERT INTO t VALUES (1), (2), (NULL)");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "export",
+            "--connection",
+            "demo",
+            "--sql",
+            "SELECT * FROM t",
+            "--out",
+            "-",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // A NULL stays distinct from an empty string once it leaves the tool.
+    assert_eq!(stdout(&out), "x\n1\n2\n\\N\n");
+    assert!(stderr(&out).contains("3 row(s)"), "{}", stderr(&out));
+}
+
+#[test]
+fn export_refuses_table_output_instead_of_writing_csv() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+    let path = f.home().join("out.csv");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "export",
+            "--connection",
+            "demo",
+            "--sql",
+            "SELECT * FROM t",
+            "--out",
+            path.to_str().unwrap(),
+            "--format",
+            "table",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("export writes csv or jsonl"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!path.exists());
+}
