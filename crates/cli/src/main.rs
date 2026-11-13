@@ -68,6 +68,10 @@ enum Command {
         /// Pass the connection's name, exactly, as confirmation.
         #[arg(long, value_name = "CONNECTION_NAME")]
         unlock_writes: Option<String>,
+        /// Statement timeout in seconds, overriding the profile when shorter.
+        /// 0 keeps the profile's timeout.
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Stream a query straight to a file, honouring the profile's caps.
     Export {
@@ -89,6 +93,10 @@ enum Command {
         /// Wrap the query in BEGIN/COMMIT, rolling back on error.
         #[arg(long)]
         transaction: bool,
+        /// Statement timeout in seconds, overriding the profile when shorter.
+        /// 0 keeps the profile's timeout.
+        #[arg(long)]
+        timeout: Option<u64>,
         #[arg(long)]
         password: Option<String>,
     },
@@ -168,6 +176,14 @@ enum ConnectionAction {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Change the safety profile of an existing connection.
+    SetProfile {
+        /// Connection id or name.
+        #[arg(long, short)]
+        connection: String,
+        /// local, staging or production.
+        profile: String,
+    },
     /// Delete a connection and its saved password.
     Remove {
         #[arg(long, short)]
@@ -218,6 +234,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             statement,
             transaction,
             unlock_writes,
+            timeout,
         } => {
             query(
                 &mut app,
@@ -231,6 +248,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     statement,
                     transaction,
                     unlock_writes,
+                    timeout,
                 },
             )
             .await
@@ -243,6 +261,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             yes,
             statement,
             transaction,
+            timeout,
             password,
         } => {
             export(
@@ -255,6 +274,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     yes,
                     statement,
                     transaction,
+                    timeout,
                     password,
                 },
             )
@@ -348,6 +368,20 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
             println!("{id}");
             Ok(())
         }
+        ConnectionAction::SetProfile {
+            connection,
+            profile,
+        } => {
+            let id = resolve(app, &connection)?;
+            let mut c = app
+                .connection(&id)
+                .ok_or_else(|| format!("no connection {id}"))?
+                .clone();
+            c.profile = parse_profile(&profile)?;
+            app.upsert_connection(c).map_err(|e| e.to_string())?;
+            println!("{id}\t{profile}");
+            Ok(())
+        }
         ConnectionAction::Remove { connection } => {
             let id = resolve(app, &connection)?;
             app.remove_connection(&id)
@@ -388,6 +422,7 @@ struct QueryArgs {
     statement: Option<usize>,
     transaction: bool,
     unlock_writes: Option<String>,
+    timeout: Option<u64>,
 }
 
 async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
@@ -401,6 +436,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         statement,
         transaction,
         unlock_writes,
+        timeout,
     } = args;
     let id = resolve(app, &connection)?;
     app.connect(&id, password)
@@ -437,6 +473,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         };
         let exec = ExecOpts {
             max_rows,
+            timeout: timeout_opt(timeout),
             ..ExecOpts::default()
         };
         let mut stdout = tokio::io::stdout();
@@ -472,7 +509,16 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut run = match app.run(&id, sql, yes).await.map_err(|e| e.to_string())? {
+    let exec = ExecOpts {
+        max_rows,
+        timeout: timeout_opt(timeout),
+        ..ExecOpts::default()
+    };
+    let mut run = match app
+        .run_with_exec(&id, sql, exec, yes)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         RunOutcome::Running(run) => run,
         RunOutcome::NeedsConfirmation { reasons } => {
             print_reasons("This statement needs confirmation", &reasons);
@@ -565,6 +611,7 @@ struct ExportArgs {
     yes: bool,
     statement: Option<usize>,
     transaction: bool,
+    timeout: Option<u64>,
     password: Option<String>,
 }
 
@@ -577,6 +624,7 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
         yes,
         statement,
         transaction,
+        timeout,
         password,
     } = args;
     let id = resolve(app, &connection)?;
@@ -609,7 +657,17 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
     if out == "-" {
         let mut buf = spanners_core::export::Buffer::new();
         let summary = match app
-            .export_with_exec(&id, sql, ExecOpts::default(), &opts, yes, &mut buf)
+            .export_with_exec(
+                &id,
+                sql,
+                ExecOpts {
+                    timeout: timeout_opt(timeout),
+                    ..ExecOpts::default()
+                },
+                &opts,
+                yes,
+                &mut buf,
+            )
             .await
         {
             Ok(summary) => summary,
@@ -646,7 +704,17 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
         .map_err(|e| format!("could not create {tmp}: {e}"))?;
 
     let result = app
-        .export_with_exec(&id, sql, ExecOpts::default(), &opts, yes, &mut file)
+        .export_with_exec(
+            &id,
+            sql,
+            ExecOpts {
+                timeout: timeout_opt(timeout),
+                ..ExecOpts::default()
+            },
+            &opts,
+            yes,
+            &mut file,
+        )
         .await;
     let flushed = file.flush().await;
     drop(file);
@@ -822,6 +890,14 @@ async fn explain(
         println!();
     }
     Ok(())
+}
+
+/// `--timeout 0` means "keep the profile's timeout", matching the config
+/// convention that zero is "no override".
+fn timeout_opt(seconds: Option<u64>) -> Option<std::time::Duration> {
+    seconds
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
 }
 
 /// Select one statement from a buffer, 1-based, the way a user counts them.

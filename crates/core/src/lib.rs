@@ -12,7 +12,7 @@ pub mod url;
 
 pub use completion::{complete, Completion, Kind as CompletionKind};
 pub use config::{AppConfig, ConfigError, ConfigStore, Connection};
-pub use executor::{execute_guarded, Gate};
+pub use executor::{execute_guarded, execute_guarded_with, Gate};
 pub use export::{export, Buffer, ExportError, ExportOpts, ExportSummary, Format, NullRepr};
 pub use history::{
     Folder, HistoryEntry, HitKind, Library, SavedQuery, SearchHit, Store, StoreError,

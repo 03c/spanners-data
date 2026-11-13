@@ -602,6 +602,19 @@ impl App {
     /// `confirmed` must come from the user accepting a confirmation for this
     /// exact SQL; never default it to `true`.
     pub async fn run(&mut self, id: &str, sql: &str, confirmed: bool) -> Result<RunOutcome> {
+        self.run_with_exec(id, sql, ExecOpts::default(), confirmed)
+            .await
+    }
+
+    /// Run with per-statement limits. `exec` can only tighten what the profile
+    /// allows; see [`spanners_core::execute_guarded_with`].
+    pub async fn run_with_exec(
+        &mut self,
+        id: &str,
+        sql: &str,
+        exec: ExecOpts,
+        confirmed: bool,
+    ) -> Result<RunOutcome> {
         if !self.is_connected(id) {
             return Err(AppError::NotConnected(id.into()));
         }
@@ -611,11 +624,12 @@ impl App {
             .get(id)
             .ok_or_else(|| AppError::NotConnected(id.into()))?;
 
-        let gate = spanners_core::execute_guarded(
+        let gate = spanners_core::execute_guarded_with(
             live.session.as_ref(),
             &live.policy,
             sql,
             live.info.dialect,
+            exec,
             confirmed,
         )
         .await?;

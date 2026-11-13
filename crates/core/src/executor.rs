@@ -3,7 +3,7 @@
 //! Kept separate from `policy` so the guardrails can be tested with a real
 //! driver (SQLite) without a UI and without a network.
 
-use spanners_driver_api::{Dialect, DriverError, QueryEvent, QueryId, Session};
+use spanners_driver_api::{Dialect, DriverError, ExecOpts, QueryEvent, QueryId, Session};
 use tokio::sync::mpsc;
 
 use crate::policy::{Policy, Verdict, Violation};
@@ -31,13 +31,45 @@ pub async fn execute_guarded(
     dialect: Dialect,
     confirmed: bool,
 ) -> Result<Gate, DriverError> {
+    execute_guarded_with(
+        session,
+        policy,
+        sql,
+        dialect,
+        ExecOpts::default(),
+        confirmed,
+    )
+    .await
+}
+
+/// [`execute_guarded`] with per-statement limits.
+///
+/// The policy is a floor, not a suggestion: a caller can lower the row cap or
+/// shorten the timeout for one statement, never raise them. A read-only policy
+/// stays read-only no matter what the caller passes.
+pub async fn execute_guarded_with(
+    session: &dyn Session,
+    policy: &Policy,
+    sql: &str,
+    dialect: Dialect,
+    mut exec: ExecOpts,
+    confirmed: bool,
+) -> Result<Gate, DriverError> {
     let in_transaction = session.in_transaction().await;
     match policy.judge_in(sql, dialect, in_transaction) {
         Verdict::Block { reasons } => Ok(Gate::Blocked { reasons }),
         Verdict::Confirm { reasons } if !confirmed => Ok(Gate::NeedsConfirmation { reasons }),
         Verdict::Confirm { .. } | Verdict::Allow => {
+            let base = policy.exec_opts();
+            exec.max_rows = match (exec.max_rows, base.max_rows) {
+                (Some(want), Some(allowed)) => Some(want.min(allowed)),
+                (Some(want), None) => Some(want),
+                (None, allowed) => allowed,
+            };
+            exec.timeout = exec.timeout.or(base.timeout);
+            exec.read_only |= base.read_only;
             let (tx, rx) = mpsc::channel(8);
-            let query_id = session.execute(sql, policy.exec_opts(), tx).await?;
+            let query_id = session.execute(sql, exec, tx).await?;
             Ok(Gate::Run {
                 query_id,
                 events: rx,
@@ -161,6 +193,49 @@ mod tests {
             }
             other => panic!("confirmed statement must run, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_caller_cannot_raise_the_profile_limits() {
+        let dir = TempDir::new().unwrap();
+        let s = session(&dir, false).await;
+        seed(s.as_ref()).await;
+
+        let mut policy = Policy::preset(Profile::Local);
+        policy.max_rows = Some(2);
+
+        // The caller asks for 100 rows; the profile says 2.
+        let gate = execute_guarded_with(
+            s.as_ref(),
+            &policy,
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 50)
+             SELECT i FROM n",
+            Dialect::Sqlite,
+            ExecOpts {
+                max_rows: Some(100),
+                ..ExecOpts::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let mut events = match gate {
+            Gate::Run { events, .. } => events,
+            other => panic!("expected to run, got {other:?}"),
+        };
+        let mut done = None;
+        while let Some(event) = events.recv().await {
+            if let QueryEvent::Done {
+                row_count,
+                truncated,
+                ..
+            } = event
+            {
+                done = Some((row_count, truncated));
+            }
+        }
+        assert_eq!(done, Some((2, true)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

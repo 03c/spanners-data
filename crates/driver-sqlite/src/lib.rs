@@ -76,6 +76,14 @@ impl Driver for SqliteDriver {
             )));
         }
 
+        // A read-only open cannot create the file, and SQLite's own message
+        // ("unable to open database file") does not say why. Say it plainly.
+        if opts.read_only && path != ":memory:" && !std::path::Path::new(&path).exists() {
+            return Err(DriverError::Connect(format!(
+                "{path} does not exist; a read-only connection cannot create it"
+            )));
+        }
+
         // The strongest read-only guarantee available: the file is opened
         // read-only, so no client bug can turn it into a write. `query_only` is
         // belt and braces for paths that ignore the flag (e.g. shared cache).

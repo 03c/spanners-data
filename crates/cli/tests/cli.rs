@@ -639,3 +639,58 @@ fn production_writes_need_the_name_typed() {
     let count = f.query("seed", "SELECT count(*) FROM t");
     assert!(stdout(&count).contains('1'), "{}", stdout(&count));
 }
+
+#[test]
+fn a_connection_can_be_tightened_to_production() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+    f.query("demo", "CREATE TABLE t (x INTEGER)");
+
+    let out = spanners(
+        f.home(),
+        &[
+            "connections",
+            "set-profile",
+            "--connection",
+            "demo",
+            "production",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // Reads still work, writes are refused at the gate.
+    let read = f.query("demo", "SELECT count(*) FROM t");
+    assert!(read.status.success(), "{}", stderr(&read));
+
+    let write = f.query("demo", "INSERT INTO t VALUES (1)");
+    assert!(!write.status.success());
+    assert!(stderr(&write).contains("read-only"), "{}", stderr(&write));
+}
+
+#[test]
+fn a_short_timeout_is_honoured() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+
+    // A recursive CTE long enough to outlast a 50 ms deadline.
+    let out = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "demo",
+            "--sql",
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000000) SELECT count(*) FROM n",
+            "--timeout",
+            "1",
+        ],
+    );
+    // The deadline must interrupt the statement rather than let it finish.
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).to_ascii_lowercase().contains("time")
+            || stderr(&out).to_ascii_lowercase().contains("interrupt"),
+        "{}",
+        stderr(&out)
+    );
+}

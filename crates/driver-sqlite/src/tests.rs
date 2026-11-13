@@ -294,3 +294,24 @@ async fn sqlite_refuses_connection_parameters_it_cannot_honour() {
         "{err}"
     );
 }
+
+#[tokio::test]
+async fn a_read_only_open_says_why_a_missing_file_cannot_be_created() {
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("absent.db");
+    let err = match SqliteDriver::new()
+        .connect(
+            &ConnConfig::sqlite(missing.to_string_lossy().to_string()),
+            SessionOpts {
+                read_only: true,
+                timeout: None,
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("expected the open to fail"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("does not exist"), "{err}");
+    assert!(err.to_string().contains("cannot create it"), "{err}");
+}
