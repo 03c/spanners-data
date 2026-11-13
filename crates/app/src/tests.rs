@@ -998,3 +998,45 @@ async fn opening_a_directory_that_does_not_exist_creates_it() {
     // The history database is the thing that needs the directory to exist.
     assert!(dir.join("spanners.db").exists());
 }
+
+#[tokio::test]
+async fn an_expired_unlock_does_not_trap_an_open_transaction() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, id) = production_app(&dir).await;
+    app.set_unlock_idle(Duration::from_millis(30));
+    app.unlock_writes(&id, "live").await.unwrap();
+
+    // Open a transaction while the unlock is still valid.
+    let mut run = match app.run(&id, "BEGIN", false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // The unlock is gone, and a write is refused — but the transaction is
+    // still open, so re-locking would silently roll back work the user has not
+    // decided to discard.
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (1)", false).await,
+        Err(AppError::UnlockExpired)
+    ));
+
+    // Ending the transaction must still be possible. Refusing COMMIT and
+    // ROLLBACK alike would leave the user with no way out of the session.
+    let mut run = match app.run(&id, "ROLLBACK", false).await {
+        Ok(RunOutcome::Running(run)) => run,
+        other => panic!("ROLLBACK should still run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    // Now that no transaction is open, the next statement re-locks.
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (1)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+    assert!(app.session_info(&id).unwrap().read_only);
+}

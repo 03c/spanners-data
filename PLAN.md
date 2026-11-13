@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections (add, edit, show, set-profile, test, import from DBeaver), query (table/csv/jsonl), export, history, check, schema, explain, saved; same config, history and policy as the app |
-| Tests | 265: 120 core, 41 app, 4 app end-to-end against real servers, 58 CLI (55 process-level, 2 against real servers), 17 driver integration, 25 driver unit/registry |
+| Tests | 267: 121 core, 42 app, 4 app end-to-end against real servers, 58 CLI (55 process-level, 2 against real servers), 17 driver integration, 25 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -301,8 +301,11 @@ action, confirmed by typing the connection name; the unlock auto-expires after
 15 minutes idle, on tab close, and on disconnect. It is not saved, and it only
 lifts read-only: DDL stays blocked, an `UPDATE` without `WHERE` still asks, and
 the row cap is unchanged. Unlocking reopens the session, so an open transaction
-is rolled back rather than straddling the change. Read-only is enforced by the
-server, so even a bug in our classifier cannot write.
+is rolled back rather than straddling the change. If the unlock expires while a
+transaction is open, the next statement is refused rather than silently rolling
+the work back — but `COMMIT`/`ROLLBACK` themselves are always allowed, so the
+user can never be trapped inside a transaction they cannot end. Read-only is
+enforced by the server, so even a bug in our classifier cannot write.
 
 `COMMIT` is never implicit on staging or production. Closing a tab or
 disconnecting with an open transaction rolls back (with a confirm prompt).

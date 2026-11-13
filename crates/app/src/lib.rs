@@ -672,7 +672,20 @@ impl App {
         if !self.is_connected(id) {
             return Err(AppError::NotConnected(id.into()));
         }
-        self.expire_unlock(id).await?;
+        let dialect = self
+            .live
+            .get(id)
+            .ok_or_else(|| AppError::NotConnected(id.into()))?
+            .info
+            .dialect;
+        // `COMMIT`/`ROLLBACK` are never subject to the unlock check. If the
+        // unlock expires mid-transaction, re-locking would roll the work back
+        // silently, and refusing the statement would trap the user in a
+        // transaction they cannot end. Ending it is always allowed.
+        let ends_transaction = spanners_core::policy::is_transaction_control(sql, dialect);
+        if !ends_transaction {
+            self.expire_unlock(id).await?;
+        }
         let live = self
             .live
             .get(id)
@@ -719,8 +732,9 @@ impl App {
                 live.schema = None;
             }
         }
-        // Any statement counts as activity for the unlock window.
-        if matches!(outcome, RunOutcome::Running(_)) {
+        // Any statement counts as activity for the unlock window, except one
+        // that ends a transaction: committing is not a new write.
+        if matches!(outcome, RunOutcome::Running(_)) && !ends_transaction {
             self.touch_unlock(id);
         }
         Ok(outcome)

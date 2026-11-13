@@ -337,6 +337,28 @@ fn sql_dialect(dialect: Dialect) -> Box<dyn SqlDialect> {
     }
 }
 
+/// True for statements that only delimit or end a transaction.
+///
+/// These are exempt from the write-unlock expiry check. Refusing them because
+/// an unlock ran out would leave the user inside a transaction they can
+/// neither commit nor roll back — the one state the tool must never create.
+pub fn is_transaction_control(sql: &str, dialect: Dialect) -> bool {
+    let Ok(statements) = Parser::parse_sql(sql_dialect(dialect).as_ref(), sql) else {
+        return false;
+    };
+    !statements.is_empty()
+        && statements.iter().all(|s| {
+            matches!(
+                s,
+                Statement::StartTransaction { .. }
+                    | Statement::Commit { .. }
+                    | Statement::Rollback { .. }
+                    | Statement::Savepoint { .. }
+                    | Statement::ReleaseSavepoint { .. }
+            )
+        })
+}
+
 pub fn classify(sql: &str, dialect: Dialect) -> Classification {
     if sql.trim().is_empty() {
         return Classification::default();
@@ -505,6 +527,36 @@ mod tests {
 
         // A plain read stays a read.
         assert!(judge("SELECT * FROM t", Profile::Production).is_allowed());
+    }
+
+    #[test]
+    fn transaction_control_is_recognised() {
+        for sql in [
+            "BEGIN",
+            "START TRANSACTION",
+            "COMMIT",
+            "END",
+            "ROLLBACK",
+            "SAVEPOINT a",
+            "ROLLBACK TO a",
+        ] {
+            assert!(
+                is_transaction_control(sql, Dialect::Postgres),
+                "{sql} should count as transaction control"
+            );
+        }
+        for sql in [
+            "SELECT 1",
+            "INSERT INTO t VALUES (1)",
+            "BEGIN; INSERT INTO t VALUES (1)",
+            "not sql",
+            "",
+        ] {
+            assert!(
+                !is_transaction_control(sql, Dialect::Postgres),
+                "{sql} should not count as transaction control"
+            );
+        }
     }
 
     #[test]
