@@ -908,3 +908,72 @@ fn an_unknown_driver_is_refused_before_it_is_saved() {
         stdout(&list)
     );
 }
+
+#[test]
+fn saved_queries_can_be_added_listed_shown_and_run() {
+    let f = Fixture::new();
+    f.add("demo", "local");
+
+    let added = spanners(
+        f.home(),
+        &[
+            "saved",
+            "add",
+            "row count",
+            "--sql",
+            "SELECT 7 AS n",
+            "--folder",
+            "reports",
+            "--connection",
+            "demo",
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+    let id = stdout(&added).trim().to_string();
+
+    let list = spanners(f.home(), &["saved", "list"]);
+    assert!(list.status.success(), "{}", stderr(&list));
+    let text = stdout(&list);
+    assert!(text.contains("reports\trow count"), "{text}");
+    assert!(text.starts_with(&id), "{text}");
+
+    let show = spanners(f.home(), &["saved", "show", &id]);
+    assert_eq!(stdout(&show).trim(), "SELECT 7 AS n");
+
+    // By id and by name, through the same engine as `query`.
+    for key in [id.as_str(), "row count"] {
+        let run = spanners(f.home(), &["saved", "run", key, "-c", "demo"]);
+        assert!(run.status.success(), "{}", stderr(&run));
+        assert!(stdout(&run).contains('7'), "{}", stdout(&run));
+    }
+
+    let removed = spanners(f.home(), &["saved", "rm", &id]);
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    let list = spanners(f.home(), &["saved", "list"]);
+    assert!(
+        stdout(&list).contains("No saved queries"),
+        "{}",
+        stdout(&list)
+    );
+}
+
+#[test]
+fn an_ambiguous_saved_query_name_asks_for_the_id() {
+    let f = Fixture::new();
+    for folder in ["one", "two"] {
+        let out = spanners(
+            f.home(),
+            &[
+                "saved", "add", "report", "--sql", "SELECT 1", "--folder", folder,
+            ],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    let out = spanners(f.home(), &["saved", "show", "report"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("matches 2 saved queries"),
+        "{}",
+        stderr(&out)
+    );
+}

@@ -129,6 +129,11 @@ enum Command {
         #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
         password: Option<String>,
     },
+    /// Saved queries: list, show, add, run, remove.
+    Saved {
+        #[command(subcommand)]
+        action: SavedAction,
+    },
     /// Show the query plan without running the query.
     Explain {
         #[arg(long, short)]
@@ -140,6 +145,56 @@ enum Command {
         json: bool,
         #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
         password: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SavedAction {
+    /// List saved queries with their folder.
+    List,
+    /// Print a saved query's SQL.
+    Show {
+        /// Id from `saved list`, or a unique name.
+        key: String,
+    },
+    /// Save a query.
+    Add {
+        name: String,
+        #[arg(long, short)]
+        sql: String,
+        /// Top-level folder to file it under; created if missing.
+        #[arg(long)]
+        folder: Option<String>,
+        /// The connection it was written for (informational).
+        #[arg(long, short)]
+        connection: Option<String>,
+    },
+    /// Run a saved query.
+    Run {
+        /// Id from `saved list`, or a unique name.
+        key: String,
+        #[arg(long, short)]
+        connection: String,
+        #[arg(long, value_enum, default_value_t = Output::Table)]
+        format: Output,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        transaction: bool,
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(long)]
+        max_rows: Option<u32>,
+        #[arg(long)]
+        unlock_writes: Option<String>,
+        #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+    /// Delete a saved query.
+    #[command(alias = "rm")]
+    Remove {
+        /// Id from `saved list`, or a unique name.
+        key: String,
     },
 }
 
@@ -295,7 +350,110 @@ async fn run(cli: Cli) -> Result<(), String> {
             json,
             password,
         } => explain(&mut app, &connection, &sql, json, password).await,
+        Command::Saved { action } => saved(&mut app, action).await,
     }
+}
+
+async fn saved(app: &mut App, action: SavedAction) -> Result<(), String> {
+    match action {
+        SavedAction::List => {
+            let library = app.library().map_err(|e| e.to_string())?;
+            let all = library.walk();
+            if all.is_empty() {
+                println!("No saved queries yet.");
+                return Ok(());
+            }
+            for (path, query) in all {
+                let folder = if path.is_empty() { "/" } else { path.as_str() };
+                println!("{}\t{folder}\t{}", query.id, query.name);
+            }
+            Ok(())
+        }
+        SavedAction::Show { key } => {
+            let library = app.library().map_err(|e| e.to_string())?;
+            let query = library.find(&key)?;
+            print!("{}", query.body);
+            if !query.body.ends_with('\n') {
+                println!();
+            }
+            Ok(())
+        }
+        SavedAction::Add {
+            name,
+            sql,
+            folder,
+            connection,
+        } => {
+            let sql = read_sql(&sql)?;
+            let folder_id = match folder {
+                Some(name) => Some(folder_id(app, &name)?),
+                None => None,
+            };
+            let connection_id = match connection {
+                Some(key) => Some(resolve(app, &key)?),
+                None => None,
+            };
+            let id = app
+                .save_query(folder_id, &name, &sql, connection_id.as_deref())
+                .map_err(|e| e.to_string())?;
+            println!("{id}");
+            Ok(())
+        }
+        SavedAction::Run {
+            key,
+            connection,
+            format,
+            yes,
+            transaction,
+            timeout,
+            max_rows,
+            unlock_writes,
+            password,
+        } => {
+            let sql = {
+                let library = app.library().map_err(|e| e.to_string())?;
+                library.find(&key)?.body.clone()
+            };
+            query(
+                app,
+                QueryArgs {
+                    connection,
+                    sql,
+                    format,
+                    yes,
+                    password,
+                    max_rows,
+                    statement: None,
+                    transaction,
+                    unlock_writes,
+                    timeout,
+                },
+            )
+            .await
+        }
+        SavedAction::Remove { key } => {
+            let id = {
+                let library = app.library().map_err(|e| e.to_string())?;
+                library.find(&key)?.id
+            };
+            app.delete_query(id).map_err(|e| e.to_string())?;
+            println!("removed {id}");
+            Ok(())
+        }
+    }
+}
+
+/// The id of a top-level folder, creating it when it does not exist.
+fn folder_id(app: &App, name: &str) -> Result<i64, String> {
+    let library = app.library().map_err(|e| e.to_string())?;
+    if let Some(folder) = library
+        .folders
+        .iter()
+        .find(|f| f.name.eq_ignore_ascii_case(name))
+    {
+        return Ok(folder.id);
+    }
+    app.create_folder(name, None).map_err(|e| e.to_string())
 }
 
 async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), String> {

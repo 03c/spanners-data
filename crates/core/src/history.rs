@@ -110,6 +110,59 @@ pub struct Library {
     pub root_queries: Vec<SavedQuery>,
 }
 
+impl Library {
+    /// Every saved query with its folder path, root queries first.
+    ///
+    /// The sidebar renders the tree, but the CLI and search want a flat list;
+    /// doing the walk here keeps the two views from disagreeing.
+    pub fn walk(&self) -> Vec<(String, &SavedQuery)> {
+        let mut out = Vec::new();
+        for query in &self.root_queries {
+            out.push((String::new(), query));
+        }
+        fn descend<'a>(folder: &'a Folder, prefix: &str, out: &mut Vec<(String, &'a SavedQuery)>) {
+            let path = if prefix.is_empty() {
+                folder.name.clone()
+            } else {
+                format!("{prefix}/{}", folder.name)
+            };
+            for query in &folder.queries {
+                out.push((path.clone(), query));
+            }
+            for child in &folder.folders {
+                descend(child, &path, out);
+            }
+        }
+        for folder in &self.folders {
+            descend(folder, "", &mut out);
+        }
+        out
+    }
+
+    /// Find a saved query by id, or by name when the name is unambiguous.
+    pub fn find(&self, key: &str) -> std::result::Result<&SavedQuery, String> {
+        let all = self.walk();
+        if let Ok(id) = key.parse::<i64>() {
+            if let Some((_, query)) = all.iter().find(|(_, q)| q.id == id) {
+                return Ok(query);
+            }
+        }
+        let matches: Vec<&SavedQuery> = all
+            .iter()
+            .filter(|(_, q)| q.name.eq_ignore_ascii_case(key))
+            .map(|(_, q)| *q)
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok(one),
+            [] => Err(format!("no saved query called '{key}'")),
+            _ => Err(format!(
+                "'{key}' matches {} saved queries; use the id from `saved list`",
+                matches.len()
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitKind {
     History,
@@ -632,6 +685,60 @@ mod tests {
         let (_, entry) = s.recent(1).unwrap().remove(0);
         assert_eq!(entry.error.as_deref(), Some("no such column"));
         assert_eq!(entry.row_count, None);
+    }
+
+    #[test]
+    fn the_library_walks_folders_and_finds_queries_by_name_or_id() {
+        let store = store();
+        let reports = store.create_folder("reports", None).unwrap();
+        let weekly = store.create_folder("weekly", Some(reports)).unwrap();
+        let root = store
+            .save_query(None, "all users", "SELECT 1", None)
+            .unwrap();
+        let nested = store
+            .save_query(Some(weekly), "signups", "SELECT 2", None)
+            .unwrap();
+        let top = store
+            .save_query(Some(reports), "revenue", "SELECT 3", None)
+            .unwrap();
+
+        let library = store.library().unwrap();
+        let walked = library.walk();
+        let paths: Vec<(String, &str)> = walked
+            .iter()
+            .map(|(p, q)| (p.clone(), q.name.as_str()))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                (String::new(), "all users"),
+                ("reports".to_string(), "revenue"),
+                ("reports/weekly".to_string(), "signups"),
+            ]
+        );
+
+        assert_eq!(library.find("signups").unwrap().id, nested);
+        assert_eq!(library.find(&top.to_string()).unwrap().name, "revenue");
+        assert_eq!(library.find(&root.to_string()).unwrap().name, "all users");
+        assert!(library.find("nope").unwrap_err().contains("no saved query"));
+    }
+
+    #[test]
+    fn an_ambiguous_name_asks_for_an_id() {
+        let store = store();
+        let a = store.create_folder("a", None).unwrap();
+        let b = store.create_folder("b", None).unwrap();
+        store
+            .save_query(Some(a), "report", "SELECT 1", None)
+            .unwrap();
+        store
+            .save_query(Some(b), "report", "SELECT 2", None)
+            .unwrap();
+
+        let library = store.library().unwrap();
+        let err = library.find("report").unwrap_err();
+        assert!(err.contains("matches 2 saved queries"), "{err}");
+        assert!(err.contains("use the id"), "{err}");
     }
 
     #[test]

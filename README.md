@@ -18,7 +18,7 @@ the shell decision, which is the only remaining blocker.
 | Postgres driver | done: streaming, `pg_cancel_backend`, statement timeout, caps |
 | MySQL driver | done: streaming, `KILL QUERY`, `max_execution_time`, caps |
 | App services (`spanners-app`) | done: connect, guarded run, cancel, schema, explain, export, history, saved queries |
-| CLI (`spanners`) | done: connections (add from URL, set-profile), query (single statement or a whole script), export, history, check, schema, explain — same config, history and policy as the app |
+| CLI (`spanners`) | done: connections (add from URL, set-profile), query (single statement or a whole script), export, history, saved queries, check, schema, explain — same config, history and policy as the app |
 | History + saved queries | done: one SQLite file, shared search, 10k/90-day prune |
 | Export | done: streaming CSV and JSON Lines, cap-aware, backs clipboard copy |
 | Dialect keywords | done: per-driver lists for highlighting and autocomplete |
@@ -52,6 +52,9 @@ $S query -c stage --sql "UPDATE users SET x = 1 WHERE id = 2" --transaction
 
 # Production: read-only at the server. Unlock one run by typing the name.
 $S query -c live --sql "UPDATE users SET x = 1 WHERE id = 2" --unlock-writes live
+
+$S saved add "top users" --sql "SELECT * FROM users ORDER BY score DESC LIMIT 20" --folder reports
+$S saved run "top users" -c local
 
 $S history            # what you ran
 $S check -c live --sql "DROP TABLE users"   # classify without running; exit 2 = blocked
