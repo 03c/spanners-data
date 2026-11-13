@@ -211,6 +211,12 @@ impl ConfigStore {
             .map(|d| d.config_dir().join("config.toml"))
     }
 
+    /// The directory holding `config.toml` and `spanners.db`.
+    pub fn default_dir() -> Option<PathBuf> {
+        directories::ProjectDirs::from("dev", "spanners", "data")
+            .map(|d| d.config_dir().to_path_buf())
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

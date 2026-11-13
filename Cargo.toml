@@ -5,6 +5,7 @@ members = [
     "crates/driver-api",
     "crates/core",
     "crates/app",
+    "crates/cli",
     "crates/driver-sqlite",
     "crates/registry",
     "crates/driver-postgres",
@@ -28,6 +29,7 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "
 spanners-driver-api = { path = "crates/driver-api" }
 spanners-core = { path = "crates/core" }
 spanners-registry = { path = "crates/registry" }
+spanners-app = { path = "crates/app" }
 spanners-driver-sqlite = { path = "crates/driver-sqlite" }
 spanners-driver-postgres = { path = "crates/driver-postgres" }
 spanners-driver-mysql = { path = "crates/driver-mysql" }

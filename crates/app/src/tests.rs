@@ -2,6 +2,7 @@ use super::*;
 use spanners_core::export::{Format, NullRepr};
 use spanners_core::HitKind;
 use spanners_core::Profile;
+use spanners_driver_api::ExecOpts;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -412,4 +413,115 @@ async fn cancel_on_an_idle_session_is_not_fatal() {
     };
     drain(&mut run).await;
     let _ = Duration::from_millis(0);
+}
+
+#[tokio::test]
+async fn export_goes_through_the_policy_gate() {
+    let dir = TempDir::new().unwrap();
+    let mut conn = local_sqlite(&dir);
+    conn.profile = Profile::Production;
+    let id = conn.id.clone();
+    // A read-only open cannot create the file, which is correct.
+    std::fs::File::create(conn.database.as_ref().unwrap()).unwrap();
+
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    let opts = ExportOpts {
+        format: Format::Csv,
+        header: true,
+        null: NullRepr::Empty,
+    };
+    let mut buf = spanners_core::export::Buffer::new();
+    let err = app
+        .export(&id, "CREATE TABLE nope (id int)", &opts, &mut buf)
+        .await
+        .unwrap_err();
+    match err {
+        AppError::Blocked { reasons } => assert!(!reasons.is_empty()),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+    // Refused before it ran, so nothing was exported or recorded.
+    assert!(buf.as_str().unwrap().is_empty());
+    assert!(app.history(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn export_asks_before_a_statement_the_profile_only_confirms() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    // Create the table while the profile is still Local, then switch: Staging
+    // would block the DDL.
+    let mut run = match app.run(&id, "CREATE TABLE t (x int)", false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    // Give Staging something to confirm: an UPDATE with no WHERE.
+    app.upsert_connection({
+        let mut c = app.connection(&id).unwrap().clone();
+        c.profile = Profile::Staging;
+        c
+    })
+    .unwrap();
+    app.disconnect(&id).await.unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    let opts = ExportOpts {
+        format: Format::Csv,
+        header: true,
+        null: NullRepr::Empty,
+    };
+    let mut buf = spanners_core::export::Buffer::new();
+    let err = app
+        .export(&id, "UPDATE t SET x = 1", &opts, &mut buf)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::NeedsConfirmation { .. }), "{err:?}");
+
+    // With consent the same statement is allowed through.
+    let mut buf = spanners_core::export::Buffer::new();
+    let summary = app
+        .export_with_exec(
+            &id,
+            "UPDATE t SET x = 1",
+            ExecOpts::default(),
+            &opts,
+            true,
+            &mut buf,
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.rows, 0);
+}
+
+#[tokio::test]
+async fn an_export_lands_in_history() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    app.export_to_string(
+        &id,
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3)\n SELECT i FROM n",
+        &ExportOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    let history = app.history(10).unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].1.sql.contains("WITH RECURSIVE"));
+    assert_eq!(history[0].1.row_count, Some(3));
+    assert!(history[0].1.error.is_none());
 }

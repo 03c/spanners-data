@@ -20,7 +20,8 @@ use spanners_core::history::{
 };
 use spanners_core::{Gate, Policy};
 use spanners_driver_api::{
-    Dialect, DriverError, Plan, QueryEvent, QueryId, SchemaSnapshot, Session, SessionOpts, Value,
+    Dialect, DriverError, ExecOpts, Plan, QueryEvent, QueryId, SchemaSnapshot, Session,
+    SessionOpts, Value,
 };
 use spanners_registry::Registry;
 use tokio::sync::mpsc;
@@ -48,6 +49,16 @@ pub enum AppError {
     Driver(#[from] DriverError),
     #[error(transparent)]
     Export(#[from] spanners_core::export::ExportError),
+    /// The connection profile refuses this SQL. Returned by paths that have no
+    /// natural place for a [`RunOutcome`], such as export.
+    #[error("blocked by the connection profile")]
+    Blocked {
+        reasons: Vec<spanners_core::Violation>,
+    },
+    #[error("this statement needs confirmation")]
+    NeedsConfirmation {
+        reasons: Vec<spanners_core::Violation>,
+    },
     #[error("{0}")]
     Io(String),
 }
@@ -463,6 +474,9 @@ impl App {
     }
 
     /// Export to any writer, honouring the connection's profile caps.
+    ///
+    /// Goes through the same policy gate as [`App::run`]: exporting must not be
+    /// a way to run SQL the profile would refuse.
     pub async fn export<W: tokio::io::AsyncWrite + Unpin>(
         &mut self,
         id: &str,
@@ -470,12 +484,80 @@ impl App {
         opts: &ExportOpts,
         out: &mut W,
     ) -> Result<ExportSummary> {
+        self.export_with_exec(id, sql, ExecOpts::default(), opts, false, out)
+            .await
+    }
+
+    /// Export with a caller-supplied lower cap (a "limit this export" control).
+    ///
+    /// The request can only tighten the profile's limits: asking for more rows
+    /// than the profile allows still yields the profile's cap, and the deadline
+    /// is never removed.
+    pub async fn export_with_exec<W: tokio::io::AsyncWrite + Unpin>(
+        &mut self,
+        id: &str,
+        sql: &str,
+        mut exec: ExecOpts,
+        opts: &ExportOpts,
+        confirmed: bool,
+        out: &mut W,
+    ) -> Result<ExportSummary> {
         let live = self
             .live
             .get(id)
             .ok_or_else(|| AppError::NotConnected(id.into()))?;
-        let exec = live.policy.exec_opts();
-        Ok(export::export(live.session.as_ref(), sql, exec, opts, out).await?)
+
+        match live.policy.judge(sql, live.info.dialect) {
+            spanners_core::Verdict::Allow => {}
+            spanners_core::Verdict::Block { reasons } => return Err(AppError::Blocked { reasons }),
+            spanners_core::Verdict::Confirm { reasons } if !confirmed => {
+                return Err(AppError::NeedsConfirmation { reasons })
+            }
+            spanners_core::Verdict::Confirm { .. } => {}
+        }
+
+        let policy = &live.policy;
+        exec.max_rows = match (exec.max_rows, policy.max_rows) {
+            (Some(requested), Some(allowed)) => Some(requested.min(allowed)),
+            (Some(requested), None) => Some(requested),
+            (None, allowed) => allowed,
+        };
+        exec.timeout = exec.timeout.or(policy.timeout);
+        exec.read_only |= policy.read_only;
+
+        let started_at = now_ms();
+        let started = Instant::now();
+        let result = export::export(live.session.as_ref(), sql, exec, opts, out).await;
+        let elapsed = started.elapsed().as_millis() as u64;
+        let summary = result?;
+
+        // An export is still a query the user ran; it belongs in history.
+        self.record(id, sql, started_at, elapsed, Some(summary.rows), None);
+        Ok(summary)
+    }
+
+    fn record(
+        &self,
+        connection_id: &str,
+        sql: &str,
+        started_at: i64,
+        duration_ms: u64,
+        row_count: Option<u64>,
+        error: Option<String>,
+    ) {
+        let entry = HistoryEntry {
+            connection_id: connection_id.to_string(),
+            sql: sql.to_string(),
+            started_at,
+            duration_ms,
+            row_count,
+            error,
+        };
+        if let Ok(store) = self.history.lock() {
+            // History is a convenience, never a reason to fail a query.
+            let _ = store.record(&entry);
+            let _ = store.prune(HISTORY_MAX_ROWS, HISTORY_MAX_DAYS);
+        }
     }
 
     /// Copy-ready text, using the same formatting as file export.

@@ -17,6 +17,7 @@ the shell decision, which is the only remaining blocker.
 | Postgres driver | done: streaming, `pg_cancel_backend`, statement timeout, caps |
 | MySQL driver | done: streaming, `KILL QUERY`, `max_execution_time`, caps |
 | App services (`spanners-app`) | done: connect, guarded run, cancel, schema, explain, export, history, saved queries |
+| CLI (`spanners`) | done: connections, query, export, history, check — same config, history and policy as the app |
 | History + saved queries | done: one SQLite file, shared search, 10k/90-day prune |
 | Export | done: streaming CSV and JSON Lines, cap-aware, backs clipboard copy |
 | Dialect keywords | done: per-driver lists for highlighting and autocomplete |
@@ -31,6 +32,7 @@ crates/
   driver-api/       trait + value types; no database dependency
   core/             policy, config, history, export, dialect data
   app/              application services: sessions, guarded runs, secrets
+  cli/              the `spanners` binary (same engine, terminal surface)
   driver-sqlite/    rusqlite driver, real interrupt-based cancel
   driver-postgres/  sqlx driver, server-side read-only + timeouts
   driver-mysql/     sqlx driver, server-side read-only + timeouts
