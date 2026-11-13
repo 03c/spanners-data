@@ -4,8 +4,9 @@
 //! a guess. A connection dialog that silently connects to the wrong host is
 //! worse than one that refuses.
 //!
-//! The password is returned separately and never stored on the [`Connection`];
-//! the caller hands it to the secret store or uses it for one session.
+//! The password is returned separately and never stored on the
+//! [`Connection`](crate::config::Connection); the caller hands it to the secret
+//! store or uses it for one session.
 
 use std::fmt;
 
