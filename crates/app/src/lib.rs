@@ -35,7 +35,7 @@ pub use secrets::KeyringSecrets;
 pub enum AppError {
     #[error("no connection with id {0}")]
     UnknownConnection(String),
-    #[error("driver {0} is not registered")]
+    #[error("driver {0} is not registered; use postgres, mysql or sqlite")]
     UnknownDriver(String),
     #[error("connection {0} is not open")]
     NotConnected(String),
@@ -251,6 +251,12 @@ impl App {
             return Err(AppError::DuplicateName {
                 name: other.name.clone(),
             });
+        }
+        // A connection with an unknown driver would only fail later, at
+        // connect time, with the user wondering what they typed. The registry
+        // is the authority on what exists.
+        if self.registry.get(&connection.driver).is_none() {
+            return Err(AppError::UnknownDriver(connection.driver.clone()));
         }
         match self
             .config

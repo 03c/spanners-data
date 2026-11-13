@@ -938,3 +938,16 @@ async fn a_connection_without_a_name_or_with_a_duplicate_is_refused() {
     first.profile = Profile::Production;
     app.upsert_connection(first).unwrap();
 }
+
+#[tokio::test]
+async fn a_connection_with_an_unknown_driver_is_refused_at_save_time() {
+    let dir = TempDir::new().unwrap();
+    let mut app = app_with(&dir).await;
+    let mut conn = local_sqlite(&dir);
+    conn.driver = "oracle".into();
+    match app.upsert_connection(conn).unwrap_err() {
+        AppError::UnknownDriver(name) => assert_eq!(name, "oracle"),
+        other => panic!("expected UnknownDriver, got {other:?}"),
+    }
+    assert!(app.connections().is_empty());
+}

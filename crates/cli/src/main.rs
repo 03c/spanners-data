@@ -54,7 +54,8 @@ enum Command {
         /// Password for a server connection; also read from $SPANNERS_PASSWORD.
         #[arg(long, env = "SPANNERS_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Maximum rows to print, overriding the connection profile.
+        /// Maximum rows to print. The profile's cap still applies when it is
+        /// smaller; this can only ask for fewer.
         #[arg(long)]
         max_rows: Option<u32>,
         /// Run only the Nth statement in the buffer (1-based).

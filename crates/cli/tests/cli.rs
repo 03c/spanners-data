@@ -882,3 +882,29 @@ fn staging_asks_before_a_schema_change() {
     );
     assert!(allowed.status.success(), "{}", stderr(&allowed));
 }
+
+#[test]
+fn an_unknown_driver_is_refused_before_it_is_saved() {
+    let f = Fixture::new();
+    let out = spanners(
+        f.home(),
+        &[
+            "connections",
+            "add",
+            "x",
+            "--driver",
+            "oracle",
+            "--database",
+            "y",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("not registered"), "{}", stderr(&out));
+
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert!(
+        stdout(&list).contains("No connections saved"),
+        "{}",
+        stdout(&list)
+    );
+}
