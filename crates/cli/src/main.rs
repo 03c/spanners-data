@@ -60,6 +60,10 @@ enum Command {
         /// Run only the Nth statement in the buffer (1-based).
         #[arg(long)]
         statement: Option<usize>,
+        /// Wrap the statement in BEGIN/COMMIT, rolling back on error. Required
+        /// for writes on a staging connection.
+        #[arg(long)]
+        transaction: bool,
     },
     /// Stream a query straight to a file, honouring the profile's caps.
     Export {
@@ -78,6 +82,9 @@ enum Command {
         /// Export only the Nth statement in the buffer (1-based).
         #[arg(long)]
         statement: Option<usize>,
+        /// Wrap the query in BEGIN/COMMIT, rolling back on error.
+        #[arg(long)]
+        transaction: bool,
         #[arg(long)]
         password: Option<String>,
     },
@@ -180,6 +187,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             password,
             max_rows,
             statement,
+            transaction,
         } => {
             query(
                 &mut app,
@@ -191,6 +199,7 @@ async fn run(cli: Cli) -> Result<(), String> {
                     password,
                     max_rows,
                     statement,
+                    transaction,
                 },
             )
             .await
@@ -202,6 +211,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             format,
             yes,
             statement,
+            transaction,
             password,
         } => {
             export(
@@ -213,13 +223,14 @@ async fn run(cli: Cli) -> Result<(), String> {
                     format,
                     yes,
                     statement,
+                    transaction,
                     password,
                 },
             )
             .await
         }
         Command::History { limit, search } => history(&app, limit, search.as_deref()),
-        Command::Check { connection, sql } => check(&app, &connection, &sql),
+        Command::Check { connection, sql } => check(&app, &connection, &sql).await,
     }
 }
 
@@ -332,6 +343,7 @@ struct QueryArgs {
     password: Option<String>,
     max_rows: Option<u32>,
     statement: Option<usize>,
+    transaction: bool,
 }
 
 async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
@@ -343,6 +355,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         password,
         max_rows,
         statement,
+        transaction,
     } = args;
     let id = resolve(app, &connection)?;
     app.connect(&id, password)
@@ -353,6 +366,10 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
         None => sql,
     };
     let sql = sql.as_str();
+
+    if transaction {
+        app.begin(&id).await.map_err(|e| e.to_string())?;
+    }
 
     // CSV and JSON Lines go through the export engine, so a NULL, an empty
     // string and duplicate column names mean the same thing here as in a file.
@@ -371,10 +388,21 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
             ..ExecOpts::default()
         };
         let mut stdout = tokio::io::stdout();
-        let summary = app
+        let summary = match app
             .export_with_exec(&id, sql, exec, &opts, yes, &mut stdout)
             .await
-            .map_err(describe)?;
+        {
+            Ok(summary) => summary,
+            Err(e) => {
+                if transaction {
+                    let _ = app.rollback(&id).await;
+                }
+                return Err(describe(e));
+            }
+        };
+        if transaction {
+            app.commit(&id).await.map_err(|e| e.to_string())?;
+        }
         stdout
             .flush()
             .await
@@ -406,6 +434,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
 
     let mut printed: usize = 0;
     let mut error = None;
+    let mut done = false;
 
     while let Some(event) = run.recv().await {
         match event {
@@ -443,7 +472,7 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
                         ""
                     }
                 );
-                return Ok(());
+                done = true;
             }
             QueryEvent::Failed { message, code, .. } => {
                 error = Some(format!(
@@ -455,8 +484,24 @@ async fn query(app: &mut App, args: QueryArgs) -> Result<(), String> {
     }
 
     match error {
-        Some(e) => Err(e),
-        None => Err("query ended without a result".into()),
+        Some(e) => {
+            if transaction {
+                let _ = app.rollback(&id).await;
+            }
+            Err(e)
+        }
+        None if done => {
+            if transaction {
+                app.commit(&id).await.map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        None => {
+            if transaction {
+                let _ = app.rollback(&id).await;
+            }
+            Err("query ended without a result".into())
+        }
     }
 }
 
@@ -467,6 +512,7 @@ struct ExportArgs {
     format: Output,
     yes: bool,
     statement: Option<usize>,
+    transaction: bool,
     password: Option<String>,
 }
 
@@ -478,6 +524,7 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
         format,
         yes,
         statement,
+        transaction,
         password,
     } = args;
     let id = resolve(app, &connection)?;
@@ -490,6 +537,10 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
     };
     let sql = sql.as_str();
     let out = out.as_str();
+
+    if transaction {
+        app.begin(&id).await.map_err(|e| e.to_string())?;
+    }
 
     let opts = ExportOpts {
         format: if format == Output::Jsonl {
@@ -505,10 +556,21 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
 
     if out == "-" {
         let mut buf = spanners_core::export::Buffer::new();
-        let summary = app
+        let summary = match app
             .export_with_exec(&id, sql, ExecOpts::default(), &opts, yes, &mut buf)
             .await
-            .map_err(describe)?;
+        {
+            Ok(summary) => summary,
+            Err(e) => {
+                if transaction {
+                    let _ = app.rollback(&id).await;
+                }
+                return Err(describe(e));
+            }
+        };
+        if transaction {
+            app.commit(&id).await.map_err(|e| e.to_string())?;
+        }
         let text = buf.into_string().map_err(|e| e.to_string())?;
         print!("{text}");
         eprintln!(
@@ -541,9 +603,15 @@ async fn export(app: &mut App, args: ExportArgs) -> Result<(), String> {
         Ok(summary) => summary,
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
+            if transaction {
+                let _ = app.rollback(&id).await;
+            }
             return Err(describe(e));
         }
     };
+    if transaction {
+        app.commit(&id).await.map_err(|e| e.to_string())?;
+    }
     if let Err(e) = flushed {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(format!("could not write {tmp}: {e}"));
@@ -607,9 +675,9 @@ fn history(app: &App, limit: u32, search: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn check(app: &App, connection: &str, sql: &str) -> Result<(), String> {
+async fn check(app: &App, connection: &str, sql: &str) -> Result<(), String> {
     let id = resolve(app, connection)?;
-    match app.judge(&id, sql).map_err(|e| e.to_string())? {
+    match app.judge(&id, sql).await.map_err(|e| e.to_string())? {
         Verdict::Allow => {
             println!("allow");
             Ok(())

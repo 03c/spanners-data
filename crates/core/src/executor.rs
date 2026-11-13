@@ -31,7 +31,8 @@ pub async fn execute_guarded(
     dialect: Dialect,
     confirmed: bool,
 ) -> Result<Gate, DriverError> {
-    match policy.judge(sql, dialect) {
+    let in_transaction = session.in_transaction().await;
+    match policy.judge_in(sql, dialect, in_transaction) {
         Verdict::Block { reasons } => Ok(Gate::Blocked { reasons }),
         Verdict::Confirm { reasons } if !confirmed => Ok(Gate::NeedsConfirmation { reasons }),
         Verdict::Confirm { .. } | Verdict::Allow => {
@@ -108,6 +109,13 @@ mod tests {
         }
     }
 
+    async fn begin(s: &dyn Session) {
+        let (tx, mut rx) = mpsc::channel(8);
+        s.execute("BEGIN", ExecOpts::default(), tx).await.unwrap();
+        while rx.recv().await.is_some() {}
+        assert!(s.in_transaction().await);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn staging_requires_confirmation_for_where_less_update() {
         let dir = TempDir::new().unwrap();
@@ -116,6 +124,23 @@ mod tests {
 
         let policy = Policy::preset(Profile::Staging);
         let sql = "UPDATE t SET id = 2";
+
+        // Staging also requires an explicit transaction, and that is a block,
+        // not a confirmation: there is no user answer that makes it safe.
+        match execute_guarded(s.as_ref(), &policy, sql, Dialect::Sqlite, false)
+            .await
+            .unwrap()
+        {
+            Gate::Blocked { reasons } => assert!(
+                reasons
+                    .iter()
+                    .any(|r| matches!(r, Violation::WriteOutsideTransaction)),
+                "{reasons:?}"
+            ),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+
+        begin(s.as_ref()).await;
 
         match execute_guarded(s.as_ref(), &policy, sql, Dialect::Sqlite, false)
             .await

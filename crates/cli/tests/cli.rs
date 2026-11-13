@@ -156,6 +156,49 @@ fn production_refuses_ddl_and_exits_non_zero() {
 }
 
 #[test]
+fn staging_requires_a_transaction_for_writes() {
+    let f = Fixture::new();
+    f.add("seed", "local");
+    f.query("seed", "CREATE TABLE t (id INTEGER)");
+    f.query("seed", "INSERT INTO t VALUES (1)");
+    f.add("stage", "staging");
+
+    // A write outside a transaction is refused before it reaches the server,
+    // even though it names its rows and the user said yes.
+    let refused = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "stage",
+            "--sql",
+            "UPDATE t SET id = 2 WHERE id = 1",
+            "--yes",
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("explicit transaction"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // Inside one, the same targeted write runs.
+    let allowed = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "stage",
+            "--sql",
+            "UPDATE t SET id = 2 WHERE id = 1",
+            "--transaction",
+        ],
+    );
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+}
+
+#[test]
 fn staging_asks_for_confirmation_unless_told_yes() {
     let f = Fixture::new();
     f.add("seed", "local");
@@ -163,7 +206,18 @@ fn staging_asks_for_confirmation_unless_told_yes() {
     f.query("seed", "INSERT INTO t VALUES (1)");
     f.add("stage", "staging");
 
-    let refused = f.query("stage", "UPDATE t SET id = 2");
+    // A write with no WHERE still needs consent, even inside a transaction.
+    let refused = spanners(
+        f.home(),
+        &[
+            "query",
+            "--connection",
+            "stage",
+            "--sql",
+            "UPDATE t SET id = 2",
+            "--transaction",
+        ],
+    );
     assert!(!refused.status.success());
     assert!(
         stderr(&refused).contains("needs confirmation"),
@@ -179,6 +233,7 @@ fn staging_asks_for_confirmation_unless_told_yes() {
             "stage",
             "--sql",
             "UPDATE t SET id = 2",
+            "--transaction",
             "--yes",
         ],
     );
@@ -388,6 +443,7 @@ fn export_can_confirm_a_statement_with_yes() {
             "UPDATE t SET id = id",
             "--out",
             path.to_str().unwrap(),
+            "--transaction",
         ],
     );
     assert!(!refused.status.success());
@@ -407,6 +463,7 @@ fn export_can_confirm_a_statement_with_yes() {
             "UPDATE t SET id = id",
             "--out",
             path.to_str().unwrap(),
+            "--transaction",
             "--yes",
         ],
     );

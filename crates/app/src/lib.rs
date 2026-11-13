@@ -217,10 +217,23 @@ impl App {
             .iter_mut()
             .find(|c| c.id == connection.id)
         {
-            Some(existing) => *existing = connection,
-            None => self.config.connections.push(connection),
+            Some(existing) => *existing = connection.clone(),
+            None => self.config.connections.push(connection.clone()),
         }
         self.config_path.save(&self.config)?;
+
+        // A live session keeps its own copy of the policy. Applying an edit
+        // immediately means tightening a profile takes effect at once rather
+        // than at the next reconnect, which is the direction that matters: a
+        // user who switches a connection to Production expects the next
+        // statement to be guarded, not the one after the next reconnect.
+        //
+        // Relaxing is only partial: server-side read-only was set when the
+        // session opened and needs a reconnect. That fails safe, because the
+        // server keeps refusing writes the new policy would allow.
+        if let Some(live) = self.live.get_mut(&connection.id) {
+            live.policy = connection.policy();
+        }
         Ok(())
     }
 
@@ -417,7 +430,7 @@ impl App {
     }
 
     /// Classify without executing, for editor linting.
-    pub fn judge(&self, id: &str, sql: &str) -> Result<spanners_core::Verdict> {
+    pub async fn judge(&self, id: &str, sql: &str) -> Result<spanners_core::Verdict> {
         let connection = self
             .connection(id)
             .ok_or_else(|| AppError::UnknownConnection(id.into()))?;
@@ -425,7 +438,13 @@ impl App {
             .dialect()
             .or_else(|| self.session_info(id).map(|i| i.dialect))
             .unwrap_or(Dialect::Postgres);
-        Ok(connection.policy().judge(sql, dialect))
+        // A connection that is not open is judged as if no transaction were
+        // open, which is the conservative answer for the staging profile.
+        let in_transaction = match self.live.get(id) {
+            Some(live) => live.session.in_transaction().await,
+            None => false,
+        };
+        Ok(connection.policy().judge_in(sql, dialect, in_transaction))
     }
 
     /// Run one buffer through the policy gate.
@@ -497,6 +516,34 @@ impl App {
         Ok(live.session.in_transaction().await)
     }
 
+    /// Start an explicit transaction.
+    ///
+    /// Staging connections require one for writes, so this is a normal action
+    /// rather than an advanced one. It is not recorded in history: `BEGIN` is
+    /// plumbing, not a query the user wants to find again.
+    pub async fn begin(&mut self, id: &str) -> Result<()> {
+        let live = self
+            .live
+            .get(id)
+            .ok_or_else(|| AppError::NotConnected(id.into()))?;
+        let (tx, mut rx) = mpsc::channel(8);
+        live.session
+            .execute("BEGIN", ExecOpts::default(), tx)
+            .await?;
+        while let Some(event) = rx.recv().await {
+            match event {
+                QueryEvent::Done { .. } => return Ok(()),
+                QueryEvent::Failed { message, .. } => {
+                    return Err(AppError::Driver(DriverError::Query(message)))
+                }
+                _ => {}
+            }
+        }
+        Err(AppError::Driver(DriverError::Query(
+            "BEGIN ended without a result".into(),
+        )))
+    }
+
     pub async fn commit(&mut self, id: &str) -> Result<()> {
         let live = self
             .live
@@ -547,7 +594,8 @@ impl App {
             .get(id)
             .ok_or_else(|| AppError::NotConnected(id.into()))?;
 
-        match live.policy.judge(sql, live.info.dialect) {
+        let in_transaction = live.session.in_transaction().await;
+        match live.policy.judge_in(sql, live.info.dialect, in_transaction) {
             spanners_core::Verdict::Allow => {}
             spanners_core::Verdict::Block { reasons } => return Err(AppError::Blocked { reasons }),
             spanners_core::Verdict::Confirm { reasons } if !confirmed => {

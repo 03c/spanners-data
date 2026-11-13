@@ -371,8 +371,18 @@ async fn judge_answers_without_running_anything() {
     let mut app = app_with(&dir).await;
     app.upsert_connection(conn).unwrap();
 
-    let verdict = app.judge(&id, "UPDATE t SET x = 1").unwrap();
-    assert!(matches!(verdict, spanners_core::Verdict::Confirm { .. }));
+    // Staging writes need an explicit transaction, so an unconnected (and
+    // therefore certainly not in a transaction) session is blocked.
+    let verdict = app.judge(&id, "UPDATE t SET x = 1").await.unwrap();
+    match verdict {
+        spanners_core::Verdict::Block { reasons } => assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, spanners_core::Violation::WriteOutsideTransaction)),
+            "{reasons:?}"
+        ),
+        other => panic!("expected Block, got {other:?}"),
+    }
     // Judging does not require a live session.
     assert!(!app.is_connected(&id));
 }
@@ -473,6 +483,8 @@ async fn export_asks_before_a_statement_the_profile_only_confirms() {
     .unwrap();
     app.disconnect(&id).await.unwrap();
     app.connect(&id, None).await.unwrap();
+    // Staging requires an explicit transaction for writes.
+    app.begin(&id).await.unwrap();
 
     let opts = ExportOpts {
         format: Format::Csv,
@@ -600,4 +612,87 @@ async fn statement_offsets_are_dialect_aware() {
     // the app asks the connection's dialect rather than assuming Postgres.
     let sql = "SELECT 1; SELECT 2";
     assert_eq!(app.statements(&id, sql).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_staging_write_is_blocked_outside_a_transaction_and_allowed_inside() {
+    let dir = TempDir::new().unwrap();
+    let conn = local_sqlite(&dir);
+    let id = conn.id.clone();
+    let mut app = app_with(&dir).await;
+    app.upsert_connection(conn).unwrap();
+    app.connect(&id, None).await.unwrap();
+
+    // Create the table while the connection is still Local: Staging would
+    // block the DDL.
+    let mut run = match app.run(&id, "CREATE TABLE t (x int)", false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+
+    app.upsert_connection({
+        let mut c = app.connection(&id).unwrap().clone();
+        c.profile = Profile::Staging;
+        c
+    })
+    .unwrap();
+
+    // Outside a transaction: blocked, and nothing reached the server.
+    match app
+        .run(&id, "INSERT INTO t VALUES (1)", false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Blocked { reasons } => assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, spanners_core::Violation::WriteOutsideTransaction)),
+            "{reasons:?}"
+        ),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+    assert_eq!(row_count(&mut app, &id, "SELECT x FROM t").await, 0);
+
+    // Reads are still allowed outside a transaction.
+    assert_eq!(row_count(&mut app, &id, "SELECT x FROM t").await, 0);
+
+    // Inside one, the write runs and the transaction sees it.
+    app.begin(&id).await.unwrap();
+    let mut run = match app
+        .run(&id, "INSERT INTO t VALUES (1)", false)
+        .await
+        .unwrap()
+    {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    drain(&mut run).await;
+    assert_eq!(row_count(&mut app, &id, "SELECT x FROM t").await, 1);
+
+    // Rolling back discards it, and the gate applies again afterwards.
+    app.rollback(&id).await.unwrap();
+    assert_eq!(row_count(&mut app, &id, "SELECT x FROM t").await, 0);
+    assert!(matches!(
+        app.run(&id, "INSERT INTO t VALUES (2)", false)
+            .await
+            .unwrap(),
+        RunOutcome::Blocked { .. }
+    ));
+}
+
+/// Run a read and return its row count, so a test can assert what a session
+/// actually sees.
+async fn row_count(app: &mut App, id: &str, sql: &str) -> u64 {
+    let mut run = match app.run(id, sql, false).await.unwrap() {
+        RunOutcome::Running(run) => run,
+        other => panic!("expected to run, got {other:?}"),
+    };
+    let mut rows = 0;
+    while let Some(event) = run.recv().await {
+        if let QueryEvent::Batch { rows: batch, .. } = event {
+            rows += batch.len() as u64;
+        }
+    }
+    rows
 }

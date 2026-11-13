@@ -14,7 +14,7 @@ Plan of record. Status: draft for review.
 | `spanners-registry` | compile-time driver registry (`mysql`, `postgres`, `sqlite`) |
 | `spanners-app` | app services: connect/sessions, guarded runs, cancel, schema, explain, export, history, saved queries, secret store |
 | `spanners-cli` | `spanners` binary: connections, query (table/csv/jsonl), export, history, check; same config, history and policy as the app |
-| Tests | 175: 84 core, 29 app, 3 app end-to-end against real servers, 20 CLI (17 process-level), 17 driver integration, 22 driver unit/registry |
+| Tests | 177: 84 core, 30 app, 3 app end-to-end against real servers, 21 CLI (18 process-level), 17 driver integration, 22 driver unit/registry |
 | M-1 spikes | both build in CI; harness validated headless under Xvfb |
 | CI | green: fmt, clippy, tests, both spikes on ubuntu-22.04 + windows-latest; Linux job with Postgres 16 + MySQL 8.4 service containers |
 | UI | not started — blocked on the shell decision (M-1) |
@@ -270,7 +270,10 @@ Three layers. Layer 1 is the actual guarantee; 2 and 3 are UX.
 
 **Layer 2 — statement inspection** (`sqlparser`) blocks multi-statement input
 and DDL on prod, and warns on `UPDATE`/`DELETE` without `WHERE`. Unparseable
-input is treated as unknown → confirmation required, never as safe.
+input is treated as unknown → confirmation required, never as safe. On staging
+a write is *blocked* unless an explicit transaction is open (`BEGIN`), so a
+forgotten `COMMIT` is a visible decision rather than an implicit one; the
+check is part of the verdict (`Policy::judge_in`), not a UI reminder.
 
 **Layer 3 — row cap + transaction gate**, as described above.
 
@@ -280,7 +283,7 @@ Presets (per connection, overridable):
 | --- | --- | --- | --- |
 | row cap | unlimited (100k mem cap) | 5,000 | **200** |
 | transactions | auto-commit | manual, explicit Commit | read-only session |
-| writes | allowed | allowed | **locked** |
+| writes | allowed | only inside an explicit transaction | **locked** |
 | DDL | allowed | warn | blocked |
 | multi-statement | allowed | allowed | blocked |
 | statement timeout | none | 60 s | 15 s |

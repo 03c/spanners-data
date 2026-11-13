@@ -165,6 +165,37 @@ impl Policy {
             Verdict::Allow
         }
     }
+
+    /// [`Policy::judge`] plus the session state the policy cannot see.
+    ///
+    /// The staging preset requires an explicit transaction for writes, so
+    /// "is a transaction open?" is part of the verdict. Keeping this separate
+    /// from `judge` means a lint pass can still classify a statement without a
+    /// live session.
+    pub fn judge_in(&self, sql: &str, dialect: Dialect, in_transaction: bool) -> Verdict {
+        let verdict = self.judge(sql, dialect);
+        if !self.require_transaction || in_transaction {
+            return verdict;
+        }
+        let classification = classify(sql, dialect);
+        let has_write = classification
+            .statements
+            .iter()
+            .any(|s| matches!(s, StmtKind::Write { .. }));
+        if !has_write {
+            return verdict;
+        }
+
+        // Keep any reasons the base verdict already found, then add this one.
+        let mut reasons = match verdict {
+            Verdict::Block { reasons } | Verdict::Confirm { reasons } => reasons,
+            Verdict::Allow => Vec::new(),
+        };
+        reasons.push(Violation::WriteOutsideTransaction);
+        reasons.sort_by_key(|v| v.code());
+        reasons.dedup_by_key(|v| v.code());
+        Verdict::Block { reasons }
+    }
 }
 
 /// Per-connection overrides of the profile preset. `None` means "use the preset".
@@ -226,6 +257,7 @@ pub enum Violation {
     WriteWithoutWhere,
     ReadOnlySession,
     Unparseable(String),
+    WriteOutsideTransaction,
 }
 
 impl Violation {
@@ -237,6 +269,7 @@ impl Violation {
             Violation::Ddl => 2,
             Violation::WriteWithoutWhere => 3,
             Violation::Unparseable(_) => 4,
+            Violation::WriteOutsideTransaction => 5,
         }
     }
 
@@ -250,6 +283,10 @@ impl Violation {
                 "UPDATE/DELETE without a WHERE clause affects every row".into()
             }
             Violation::ReadOnlySession => "this connection is read-only".into(),
+            Violation::WriteOutsideTransaction => {
+                "writes on this connection must be inside an explicit transaction; run BEGIN first"
+                    .into()
+            }
             Violation::Unparseable(e) => {
                 format!("could not parse the statement ({e}); confirm before running")
             }
