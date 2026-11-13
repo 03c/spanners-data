@@ -568,11 +568,14 @@ async fn connections(app: &mut App, action: ConnectionAction) -> Result<(), Stri
                 return Ok(());
             }
             for c in app.connections() {
+                // The profile is the most important column in a tool whose
+                // point is safety, so it is not hidden behind a flag.
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     c.id,
                     c.name,
                     c.driver,
+                    c.profile.as_str(),
                     spanners_core::config::redact_dsn(&match (&c.host, &c.database) {
                         (Some(h), Some(d)) => format!("{h}/{d}"),
                         (Some(h), None) => h.clone(),

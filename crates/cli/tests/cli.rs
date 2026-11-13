@@ -678,6 +678,15 @@ fn a_connection_can_be_tightened_to_production() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
 
+    // The profile is visible without asking for it: it is the thing that
+    // decides whether a write is refused.
+    let list = spanners(f.home(), &["connections", "list"]);
+    assert!(
+        stdout(&list).contains("demo\tsqlite\tproduction"),
+        "{}",
+        stdout(&list)
+    );
+
     // Reads still work, writes are refused at the gate.
     let read = f.query("demo", "SELECT count(*) FROM t");
     assert!(read.status.success(), "{}", stderr(&read));
