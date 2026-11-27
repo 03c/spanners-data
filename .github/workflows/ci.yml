@@ -12,6 +12,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job runs on GitHub-hosted runners: the repository is public, so hosted
+# minutes — including the Windows legs — are free and unlimited, and there is no
+# fleet to route jobs to. The Linux image is pinned so the toolchain stays
+# predictable; the Windows leg takes whatever the hosted image is now.
 jobs:
   rust:
     name: core (${{ matrix.os }})
@@ -47,6 +51,9 @@ jobs:
     # The driver suites are env-gated, so they pass without a server. This job
     # is what actually exercises streaming, cancellation, row caps and
     # server-enforced read-only against real Postgres and MySQL.
+    #
+    # `services` needs Docker: the hosted Ubuntu image has it, so the containers
+    # come up on every run of this job without anything installed on the runner.
     runs-on: ubuntu-22.04
     services:
       postgres:
@@ -130,6 +137,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The hosted Ubuntu image does not ship the webview libs, so this step
+      # stays. The hosted runner user already has passwordless sudo, so the cost
+      # is a package install per run — the price of a reproducible image rather
+      # than a machine someone set up by hand.
       - name: install Linux webview deps
         if: runner.os == 'Linux'
         run: |
