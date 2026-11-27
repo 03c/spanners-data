@@ -12,14 +12,22 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job runs on the self-hosted runners, picked by label group rather than
+# by name, so a second machine joins without editing this file. If a runner
+# carries a project label (e.g. `spanners`), add it to the group below and jobs
+# will only land on runners that have all of them.
 jobs:
   rust:
-    name: core (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: core (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          - label: linux-x64
+            runner: [self-hosted, linux, x64]
+          - label: windows-x64
+            runner: [self-hosted, windows, x64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,7 +55,11 @@ jobs:
     # The driver suites are env-gated, so they pass without a server. This job
     # is what actually exercises streaming, cancellation, row caps and
     # server-enforced read-only against real Postgres and MySQL.
-    runs-on: ubuntu-22.04
+    #
+    # `services` needs Docker on the runner: GitHub starts these containers
+    # through the runner's own daemon, so a Linux runner without Docker reports
+    # no runner for this job rather than failing it.
+    runs-on: [self-hosted, linux, x64]
     services:
       postgres:
         image: postgres:16-alpine
@@ -96,12 +108,16 @@ jobs:
           fi
 
   spike-egui:
-    name: spike-egui (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: spike-egui (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          - label: linux-x64
+            runner: [self-hosted, linux, x64]
+          - label: windows-x64
+            runner: [self-hosted, windows, x64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -114,22 +130,30 @@ jobs:
       - name: upload spike binary
         uses: actions/upload-artifact@v4
         with:
-          name: spike-egui-${{ matrix.os }}
+          name: spike-egui-${{ matrix.label }}
           path: |
             apps/spike-egui/target/release/spike-egui
             apps/spike-egui/target/release/spike-egui.exe
           if-no-files-found: ignore
 
   spike-tauri:
-    name: spike-tauri (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: spike-tauri (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          - label: linux-x64
+            runner: [self-hosted, linux, x64]
+          - label: windows-x64
+            runner: [self-hosted, windows, x64]
     steps:
       - uses: actions/checkout@v4
 
+      # On a self-hosted runner this is a package install on someone's machine.
+      # Either let the runner user have passwordless sudo, or install the webview
+      # deps once and drop this step; re-running apt on every job is slower than
+      # the build it is preparing for.
       - name: install Linux webview deps
         if: runner.os == 'Linux'
         run: |
@@ -170,7 +194,7 @@ jobs:
       - name: upload spike binary
         uses: actions/upload-artifact@v4
         with:
-          name: spike-tauri-${{ matrix.os }}
+          name: spike-tauri-${{ matrix.label }}
           path: |
             apps/spike-tauri/src-tauri/target/release/spike-tauri
             apps/spike-tauri/src-tauri/target/release/spike-tauri.exe

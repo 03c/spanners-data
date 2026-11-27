@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  # A merge to main is gated on the CI run for that same commit, so what you
+  # download is what the tests actually ran against. CI has to be on main for
+  # this to fire — a workflow_run trigger only sees runs on the default branch,
+  # and this is the only main trigger so a merge produces exactly one release.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: ["main"]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: [self-hosted, linux, x64]
+            binary: spanners
+            archive: tar.gz
+          - label: windows-x64
+            runner: [self-hosted, windows, x64]
+            binary: spanners.exe
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # For a workflow_run trigger, the commit CI proved is not this run's
+          # commit; checkout the one the green run reported.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release -p spanners-cli
+
+      - name: package (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -o pipefail
+          # The workspace version is the release version; reading it from
+          # Cargo.toml keeps the asset names honest when the manifest changes.
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          base="spanners-${version}-${{ matrix.label }}"
+          mkdir -p dist
+          tar -czf "dist/${base}.${{ matrix.archive }}" -C target/release "${{ matrix.binary }}"
+          sha256sum "dist/${base}.${{ matrix.archive }}" > "dist/${base}.sha256"
+
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $base = "spanners-$version-${{ matrix.label }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "target/release/${{ matrix.binary }}" -DestinationPath "dist/$base.${{ matrix.archive }}"
+          (Get-FileHash "dist/$base.${{ matrix.archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/$base.sha256"
+
+      - name: upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.label }}
+          path: dist
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: release notes
+        run: |
+          {
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            commit=$(git rev-parse --short HEAD)
+            echo "spanners ${version}, built from \`${commit}\` on the self-hosted runners."
+            echo
+            echo "| Asset | SHA-256 |"
+            echo "| --- | --- |"
+            for f in dist/*.sha256; do
+              echo "| $(basename "${f%.sha256}") | $(cut -d' ' -f1 "$f") |"
+            done
+            echo
+            echo "Binary only, no installer. \`spanners connections add <url>\` then \`spanners query\`."
+          } > notes.md
+          cat notes.md
+
+      # A JS action, so this job needs Node 20+ and git on the runner. It is the
+      # only step here that talks to GitHub, and the only one that needs a token.
+      - name: release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Merges to main share one rolling tag so the download URL stays stable
+          # and each merge replaces the previous build; version tags get their own.
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main-build' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && format('spanners {0}', github.ref_name) || 'spanners main build' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          overwrite: true
+          body_path: notes.md
+          files: dist/*
+          # An empty dist would publish a release with no assets and look green;
+          # that is the failure mode worth making red.
+          fail_on_unmatched_files: true
