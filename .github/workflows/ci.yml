@@ -12,22 +12,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
-# Every job runs on the self-hosted runners, picked by label group rather than
-# by name, so a second machine joins without editing this file. If a runner
-# carries a project label (e.g. `spanners`), add it to the group below and jobs
-# will only land on runners that have all of them.
+# Every job runs on GitHub-hosted runners: the repository is public, so hosted
+# minutes — including the Windows legs — are free and unlimited, and there is no
+# fleet to route jobs to. The Linux image is pinned so the toolchain stays
+# predictable; the Windows leg takes whatever the hosted image is now.
 jobs:
   rust:
-    name: core (${{ matrix.label }})
-    runs-on: ${{ matrix.runner }}
+    name: core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: linux-x64
-            runner: [self-hosted, linux, x64]
-          - label: windows-x64
-            runner: windows-latest
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -56,10 +52,9 @@ jobs:
     # is what actually exercises streaming, cancellation, row caps and
     # server-enforced read-only against real Postgres and MySQL.
     #
-    # `services` needs Docker on the runner: GitHub starts these containers
-    # through the runner's own daemon, so a Linux runner without Docker reports
-    # no runner for this job rather than failing it.
-    runs-on: [self-hosted, linux, x64]
+    # `services` needs Docker: the hosted Ubuntu image has it, so the containers
+    # come up on every run of this job without anything installed on the runner.
+    runs-on: ubuntu-22.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -108,16 +103,12 @@ jobs:
           fi
 
   spike-egui:
-    name: spike-egui (${{ matrix.label }})
-    runs-on: ${{ matrix.runner }}
+    name: spike-egui (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: linux-x64
-            runner: [self-hosted, linux, x64]
-          - label: windows-x64
-            runner: windows-latest
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -130,30 +121,26 @@ jobs:
       - name: upload spike binary
         uses: actions/upload-artifact@v4
         with:
-          name: spike-egui-${{ matrix.label }}
+          name: spike-egui-${{ matrix.os }}
           path: |
             apps/spike-egui/target/release/spike-egui
             apps/spike-egui/target/release/spike-egui.exe
           if-no-files-found: ignore
 
   spike-tauri:
-    name: spike-tauri (${{ matrix.label }})
-    runs-on: ${{ matrix.runner }}
+    name: spike-tauri (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: linux-x64
-            runner: [self-hosted, linux, x64]
-          - label: windows-x64
-            runner: windows-latest
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
-      # On a self-hosted runner this is a package install on someone's machine.
-      # Either let the runner user have passwordless sudo, or install the webview
-      # deps once and drop this step; re-running apt on every job is slower than
-      # the build it is preparing for.
+      # The hosted Ubuntu image does not ship the webview libs, so this step
+      # stays. The hosted runner user already has passwordless sudo, so the cost
+      # is a package install per run — the price of a reproducible image rather
+      # than a machine someone set up by hand.
       - name: install Linux webview deps
         if: runner.os == 'Linux'
         run: |
@@ -194,7 +181,7 @@ jobs:
       - name: upload spike binary
         uses: actions/upload-artifact@v4
         with:
-          name: spike-tauri-${{ matrix.label }}
+          name: spike-tauri-${{ matrix.os }}
           path: |
             apps/spike-tauri/src-tauri/target/release/spike-tauri
             apps/spike-tauri/src-tauri/target/release/spike-tauri.exe

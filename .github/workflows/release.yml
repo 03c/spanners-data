@@ -34,7 +34,7 @@ jobs:
       matrix:
         include:
           - label: linux-x64
-            runner: [self-hosted, linux, x64]
+            runner: ubuntu-22.04
             binary: spanners
             archive: tar.gz
           - label: windows-x64
@@ -84,7 +84,7 @@ jobs:
   publish:
     name: publish release
     needs: build
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,7 +100,7 @@ jobs:
           {
             version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             commit=$(git rev-parse --short HEAD)
-            echo "spanners ${version}, built from \`${commit}\` on the self-hosted runners."
+            echo "spanners ${version}, built from \`${commit}\` on GitHub-hosted runners."
             echo
             echo "| Asset | SHA-256 |"
             echo "| --- | --- |"
