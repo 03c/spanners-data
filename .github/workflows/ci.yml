@@ -13,8 +13,11 @@ env:
   CARGO_TERM_COLOR: always
 
 # Linux legs go to the self-hosted fleet, matched by label group rather than by
-# runner name so another machine can join without editing this file. The fleet
-# has no Windows box, so the Windows leg stays on GitHub-hosted.
+# runner name so another machine can join without editing this file. CI is
+# Linux-only: the fleet has no Windows box and the account has no
+# GitHub-hosted-runner spending for private repos, so a windows-latest job fails
+# instantly at 0s with no steps. A Windows leg can come back when a Windows
+# runner or hosted-runner billing exists.
 jobs:
   rust:
     name: core (${{ matrix.os }})
@@ -25,8 +28,6 @@ jobs:
         include:
           - os: linux-x64
             runner: [self-hosted, linux, x64]
-          - os: windows-x64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -111,8 +112,6 @@ jobs:
         include:
           - os: linux-x64
             runner: [self-hosted, linux, x64]
-          - os: windows-x64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -140,8 +139,6 @@ jobs:
         include:
           - os: linux-x64
             runner: [self-hosted, linux, x64]
-          - os: windows-x64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
 
