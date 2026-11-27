@@ -16,6 +16,11 @@ env:
 # by name, so a second machine joins without editing this file. If a runner
 # carries a project label (e.g. `spanners`), add it to the group below and jobs
 # will only land on runners that have all of them.
+#
+# Linux only for now: the fleet has no Windows machine and this account has no
+# GitHub-hosted-runner minutes for private repos, so a `windows-latest` leg fails
+# immediately at 0s. Add the leg back when a Windows runner joins or hosted-runner
+# billing exists.
 jobs:
   rust:
     name: core (${{ matrix.label }})
@@ -26,8 +31,6 @@ jobs:
         include:
           - label: linux-x64
             runner: [self-hosted, linux, x64]
-          - label: windows-x64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -116,8 +119,6 @@ jobs:
         include:
           - label: linux-x64
             runner: [self-hosted, linux, x64]
-          - label: windows-x64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -145,8 +146,6 @@ jobs:
         include:
           - label: linux-x64
             runner: [self-hosted, linux, x64]
-          - label: windows-x64
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
 

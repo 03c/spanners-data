@@ -32,15 +32,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Linux-only until a Windows runner joins the fleet or hosted-runner
+        # billing exists; a `windows-latest` leg fails at 0s on this account.
         include:
           - label: linux-x64
             runner: [self-hosted, linux, x64]
             binary: spanners
             archive: tar.gz
-          - label: windows-x64
-            runner: windows-latest
-            binary: spanners.exe
-            archive: zip
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,16 +62,6 @@ jobs:
           mkdir -p dist
           tar -czf "dist/${base}.${{ matrix.archive }}" -C target/release "${{ matrix.binary }}"
           sha256sum "dist/${base}.${{ matrix.archive }}" > "dist/${base}.sha256"
-
-      - name: package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
-          $base = "spanners-$version-${{ matrix.label }}"
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "target/release/${{ matrix.binary }}" -DestinationPath "dist/$base.${{ matrix.archive }}"
-          (Get-FileHash "dist/$base.${{ matrix.archive }}" -Algorithm SHA256).Hash.ToLower() | Set-Content "dist/$base.sha256"
 
       - name: upload dist
         uses: actions/upload-artifact@v4
