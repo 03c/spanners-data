@@ -21,7 +21,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -74,7 +74,7 @@ jobs:
       SPANNERS_TEST_POSTGRES: postgres://postgres:pass@127.0.0.1:55432/postgres
       SPANNERS_TEST_MYSQL: mysql://root:pass@127.0.0.1:53306/spanners
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: driver integration tests
@@ -103,7 +103,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -112,7 +112,7 @@ jobs:
         run: cargo build --release --manifest-path apps/spike-egui/Cargo.toml
 
       - name: upload spike binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: spike-egui-${{ matrix.os }}
           path: |
@@ -128,7 +128,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: install Linux webview deps
         if: runner.os == 'Linux'
@@ -144,7 +144,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: "12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -168,7 +168,7 @@ jobs:
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
       - name: upload spike binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: spike-tauri-${{ matrix.os }}
           path: |
