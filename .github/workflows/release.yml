@@ -38,7 +38,7 @@ jobs:
             binary: spanners
             archive: tar.gz
           - label: windows-x64
-            runner: [self-hosted, windows, x64]
+            runner: windows-latest
             binary: spanners.exe
             archive: zip
     steps:
