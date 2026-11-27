@@ -12,14 +12,21 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Linux legs go to the self-hosted fleet, matched by label group rather than by
+# runner name so another machine can join without editing this file. The fleet
+# has no Windows box, so the Windows leg stays on GitHub-hosted.
 jobs:
   rust:
     name: core (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          - os: linux-x64
+            runner: [self-hosted, linux, x64]
+          - os: windows-x64
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,7 +54,7 @@ jobs:
     # The driver suites are env-gated, so they pass without a server. This job
     # is what actually exercises streaming, cancellation, row caps and
     # server-enforced read-only against real Postgres and MySQL.
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, linux, x64]
     services:
       postgres:
         image: postgres:16-alpine
@@ -97,11 +104,15 @@ jobs:
 
   spike-egui:
     name: spike-egui (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          - os: linux-x64
+            runner: [self-hosted, linux, x64]
+          - os: windows-x64
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -122,11 +133,15 @@ jobs:
 
   spike-tauri:
     name: spike-tauri (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          - os: linux-x64
+            runner: [self-hosted, linux, x64]
+          - os: windows-x64
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
 
