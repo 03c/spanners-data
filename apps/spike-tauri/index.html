@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Spanners Data — shell spike</title>
+    <style>
+      :root {
+        --row-h: 22px;
+        --col-w: 110px;
+        color-scheme: dark;
+        --bg: #17181c;
+        --panel: #1e2026;
+        --line: #2b2e36;
+        --fg: #d7dae0;
+        --muted: #8b93a1;
+        --accent: #7aa2f7;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+      body { font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+      #app { display: flex; flex-direction: column; height: 100%; }
+      #editor-pane { height: 34%; min-height: 180px; border-bottom: 1px solid var(--line); overflow: hidden; }
+      #editor { height: 100%; }
+      #editor .cm-editor { height: 100%; }
+      #editor .cm-scroller { overflow: auto; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 12px; }
+      #grid-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+      #grid-head { display: flex; border-bottom: 1px solid var(--line); background: var(--panel); }
+      #grid-head div {
+        width: var(--col-w); flex: 0 0 var(--col-w); padding: 4px 8px;
+        color: var(--muted); font-weight: 600; border-right: 1px solid var(--line);
+      }
+      #grid-scroll { flex: 1; overflow: auto; position: relative; contain: strict; }
+      #grid-spacer { width: 1px; }
+      #grid-body { position: absolute; top: 0; left: 0; will-change: transform; }
+      .row { display: flex; height: var(--row-h); }
+      .row:nth-child(even) { background: #1a1c21; }
+      .cell {
+        width: var(--col-w); flex: 0 0 var(--col-w); padding: 0 8px;
+        border-right: 1px solid #22242b; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+        line-height: var(--row-h);
+      }
+      .num { text-align: right; color: #9ece6a; }
+      #status { padding: 4px 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <section id="editor-pane"><div id="editor"></div></section>
+      <section id="grid-pane">
+        <div id="grid-head"></div>
+        <div id="grid-scroll"><div id="grid-spacer"></div><div id="grid-body"></div></div>
+      </section>
+      <div id="status">measuring…</div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

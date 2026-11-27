@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+exclude = ["apps/spike-egui", "apps/spike-tauri/src-tauri"]
+members = [
+    "crates/driver-api",
+    "crates/core",
+    "crates/app",
+    "crates/cli",
+    "crates/driver-sqlite",
+    "crates/registry",
+    "crates/driver-postgres",
+    "crates/driver-mysql",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/03c/spanners-data"
+
+[workspace.dependencies]
+async-trait = "0.1.92"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+
+spanners-driver-api = { path = "crates/driver-api" }
+spanners-core = { path = "crates/core" }
+spanners-registry = { path = "crates/registry" }
+spanners-app = { path = "crates/app" }
+spanners-driver-sqlite = { path = "crates/driver-sqlite" }
+spanners-driver-postgres = { path = "crates/driver-postgres" }
+spanners-driver-mysql = { path = "crates/driver-mysql" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

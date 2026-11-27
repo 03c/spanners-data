@@ -1,0 +1,24 @@
+[package]
+name = "spanners-driver-mysql"
+description = "MySQL driver for Spanners Data (sqlx, pure-Rust wire protocol)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spanners-driver-api.workspace = true
+async-trait.workspace = true
+futures-util = "0.3"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+    "mysql",
+    "chrono",
+    "bigdecimal",
+    "json",
+] }
+tokio.workspace = true
+chrono = "0.4"
+serde_json.workspace = true

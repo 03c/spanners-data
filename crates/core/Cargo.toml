@@ -1,0 +1,23 @@
+[package]
+name = "spanners-core"
+description = "Connection profiles, safety policy, config storage and query execution for Spanners Data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spanners-driver-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+sqlparser = { version = "0.64", features = ["visitor"] }
+toml = "1.2"
+directories = "6.0"
+rusqlite = { version = "0.39", features = ["bundled", "hooks", "column_decltype"] }
+
+[dev-dependencies]
+spanners-driver-sqlite.workspace = true
+tempfile = "3.27"

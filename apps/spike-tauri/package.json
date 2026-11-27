@@ -1,0 +1,27 @@
+{
+  "name": "spike-tauri",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@codemirror/lang-sql": "^6",
+    "@codemirror/state": "^6",
+    "@codemirror/view": "^6",
+    "@tauri-apps/api": "^2",
+    "codemirror": "^6"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vite": "^7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

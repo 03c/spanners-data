@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: docs
+        # A broken intra-doc link is a small thing that rots quietly; the
+        # workspace docs are part of how a driver author learns the boundary.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+      - name: test
+        run: cargo test --workspace
+      - name: build without the OS keychain
+        # The fallback path (session-only passwords) must keep compiling.
+        run: cargo test -p spanners-app --no-default-features
+
+  drivers:
+    name: driver integration (Linux)
+    # The driver suites are env-gated, so they pass without a server. This job
+    # is what actually exercises streaming, cancellation, row caps and
+    # server-enforced read-only against real Postgres and MySQL.
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pass
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: pass
+          MYSQL_DATABASE: spanners
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ppass --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SPANNERS_TEST_POSTGRES: postgres://postgres:pass@127.0.0.1:55432/postgres
+      SPANNERS_TEST_MYSQL: mysql://root:pass@127.0.0.1:53306/spanners
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: driver integration tests
+        run: |
+          set -o pipefail
+          # One thread per test: the suites create and drop pid-named tables and
+          # serialising keeps failure output readable. `--nocapture` also lets
+          # the skip check below see the drivers' own messages.
+          # The CLI is included because its end-to-end tests are the only ones
+          # that exercise the whole path a user takes: a URL, a profile, a
+          # password from the environment, and the policy verdict.
+          cargo test -p spanners-driver-postgres -p spanners-app -p spanners-cli -- --test-threads=1 --nocapture 2>&1 | tee /tmp/pg.log
+          cargo test -p spanners-driver-mysql -- --test-threads=1 --nocapture 2>&1 | tee /tmp/mysql.log
+          # A typo in the service env would make every test print "skipped" and
+          # pass, which is worse than red.
+          if grep -q "skipped: SPANNERS_TEST" /tmp/pg.log /tmp/mysql.log; then
+            echo "::error::driver tests skipped — the service URLs are not set"
+            exit 1
+          fi
+
+  spike-egui:
+    name: spike-egui (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/spike-egui
+      - name: build
+        run: cargo build --release --manifest-path apps/spike-egui/Cargo.toml
+
+      - name: upload spike binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: spike-egui-${{ matrix.os }}
+          path: |
+            apps/spike-egui/target/release/spike-egui
+            apps/spike-egui/target/release/spike-egui.exe
+          if-no-files-found: ignore
+
+  spike-tauri:
+    name: spike-tauri (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install Linux webview deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/spike-tauri/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/spike-tauri/src-tauri
+
+      - name: install frontend deps
+        working-directory: apps/spike-tauri
+        run: pnpm install --frozen-lockfile
+
+      - name: build frontend
+        working-directory: apps/spike-tauri
+        run: pnpm build
+
+      - name: build shell
+        working-directory: apps/spike-tauri
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: upload spike binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: spike-tauri-${{ matrix.os }}
+          path: |
+            apps/spike-tauri/src-tauri/target/release/spike-tauri
+            apps/spike-tauri/src-tauri/target/release/spike-tauri.exe
+          if-no-files-found: ignore
